@@ -163,7 +163,7 @@ func req(key string, channels ...domain.Channel) domain.Request {
 }
 
 func testConfig() Config {
-	return Config{PoolSize: 4, SendTimeout: time.Second, DrainTimeout: time.Second, MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond}
+	return Config{PoolSize: 4, SendTimeout: time.Second, ProviderATimeout: time.Second, ProviderBTimeout: time.Second, StatusTimeout: time.Second, DrainTimeout: time.Second, MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond}
 }
 
 type harness struct {
@@ -181,9 +181,9 @@ func newHarness(t *testing.T, cfg Config, batches ...*fakeBatch) *harness {
 		b.rec = rec
 	}
 	h := &harness{rec: rec, consumer: &fakeConsumer{rec: rec, batches: batches}, store: newStore(rec), provider: &fakeProvider{rec: rec}}
-	providers := map[domain.Channel]ports.Provider{}
+	providers := map[domain.Channel]Pair{}
 	for _, c := range domain.Channels() {
-		providers[c] = h.provider
+		providers[c] = Pair{A: h.provider}
 	}
 	s, err := New(h.consumer, h.store, providers, cfg, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -300,20 +300,20 @@ func TestProviderErrorMarksFailed(t *testing.T) {
 	stop := h.run(t)
 	eventually(t, "a failed row", func() bool { h.store.mu.Lock(); defer h.store.mu.Unlock(); return len(h.store.failed) == 1 })
 	stop()
-	if got := h.store.failed["k1|sms"]; got != "boom" {
+	if got := h.store.failed["k1|sms"]; got != "fake: boom" {
 		t.Errorf("failure reason = %q", got)
 	}
 }
 
-func TestSendTimeoutMarksFailed(t *testing.T) {
+func TestSendTimeoutMarksUnresolved(t *testing.T) {
 	cfg := testConfig()
 	cfg.SendTimeout = 20 * time.Millisecond
 	h := newHarness(t, cfg, &fakeBatch{reqs: []domain.Request{req("k1", domain.ChannelSMS)}})
 	h.provider.send = func(ctx context.Context, _ domain.Notification) (string, error) { <-ctx.Done(); return "", ctx.Err() }
 	stop := h.run(t)
-	eventually(t, "a failed row", func() bool { h.store.mu.Lock(); defer h.store.mu.Unlock(); return len(h.store.failed) == 1 })
+	eventually(t, "an unresolved row", func() bool { h.store.mu.Lock(); defer h.store.mu.Unlock(); return len(h.store.unresolved) == 1 })
 	stop()
-	if got := h.store.failed["k1|sms"]; !strings.Contains(got, "deadline exceeded") {
+	if got := h.store.unresolved["k1|sms"]; !strings.Contains(got, "deadline exceeded") {
 		t.Errorf("failure reason = %q", got)
 	}
 }
@@ -374,16 +374,27 @@ func TestShutdownWaitsForInFlightSends(t *testing.T) {
 }
 
 func TestNewValidatesConfig(t *testing.T) {
-	bad := []Config{
-		{PoolSize: 0, SendTimeout: time.Second, MinBackoff: 1, MaxBackoff: 1},
-		{PoolSize: 1, SendTimeout: 0, MinBackoff: 1, MaxBackoff: 1},
-		{PoolSize: 1, SendTimeout: time.Second, MinBackoff: 0, MaxBackoff: 1},
-		{PoolSize: 1, SendTimeout: time.Second, MinBackoff: 2, MaxBackoff: 1},
+	var bad []Config
+	with := func(change func(*Config)) {
+		cfg := testConfig()
+		change(&cfg)
+		bad = append(bad, cfg)
 	}
+	with(func(c *Config) { c.PoolSize = 0 })
+	with(func(c *Config) { c.SendTimeout = 0 })
+	with(func(c *Config) { c.ProviderATimeout = 0 })
+	with(func(c *Config) { c.ProviderBTimeout = 0 })
+	with(func(c *Config) { c.StatusTimeout = 0 })
+	with(func(c *Config) { c.MinBackoff = 0 })
+	with(func(c *Config) { c.MinBackoff, c.MaxBackoff = 2, 1 })
 	for i, cfg := range bad {
 		if _, err := New(nil, nil, nil, cfg, slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("config %d accepted", i)
 		}
+	}
+	noA := map[domain.Channel]Pair{domain.ChannelSMS: {B: &fakeProvider{}}}
+	if _, err := New(nil, nil, noA, testConfig(), slog.New(slog.DiscardHandler)); err == nil {
+		t.Error("a pair without provider A was accepted")
 	}
 }
 

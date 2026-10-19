@@ -138,7 +138,9 @@ func TestLoadSenderDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.KafkaGroupID != "eshaar-sender" || cfg.SenderPoolSize != 256 || cfg.SenderBatchSize != 500 ||
-		cfg.SenderSendTimeout != 3*time.Second || cfg.ProviderRateLimit != 1000 {
+		cfg.SenderSendTimeout != 4500*time.Millisecond || cfg.ProviderRateLimit != 1000 ||
+		cfg.ProviderATimeout != 2*time.Second || cfg.ProviderBTimeout != 2*time.Second ||
+		cfg.ProviderStatusTimeout != 500*time.Millisecond || cfg.BreakerFailures != 5 || cfg.BreakerOpenFor != 30*time.Second {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
 }
@@ -147,12 +149,16 @@ func TestLoadSenderOverrides(t *testing.T) {
 	cfg, err := Load(env(map[string]string{
 		EnvKafkaGroupID: "g2", EnvSenderPoolSize: "8", EnvSenderBatchSize: "50",
 		EnvSenderSendTimeout: "1500ms", EnvProviderRateLimit: "2.5",
+		EnvProviderATimeout: "700ms", EnvProviderBTimeout: "800ms", EnvProviderStatusTimeout: "90ms",
+		EnvBreakerFailures: "3", EnvBreakerOpenFor: "10s",
 	}), NeedSender)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.KafkaGroupID != "g2" || cfg.SenderPoolSize != 8 || cfg.SenderBatchSize != 50 ||
-		cfg.SenderSendTimeout != 1500*time.Millisecond || cfg.ProviderRateLimit != 2.5 {
+		cfg.SenderSendTimeout != 1500*time.Millisecond || cfg.ProviderRateLimit != 2.5 ||
+		cfg.ProviderATimeout != 700*time.Millisecond || cfg.ProviderBTimeout != 800*time.Millisecond ||
+		cfg.ProviderStatusTimeout != 90*time.Millisecond || cfg.BreakerFailures != 3 || cfg.BreakerOpenFor != 10*time.Second {
 		t.Errorf("overrides ignored: %+v", cfg)
 	}
 }
@@ -160,11 +166,16 @@ func TestLoadSenderOverrides(t *testing.T) {
 func TestLoadSenderReportsEveryProblem(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		EnvSenderPoolSize: "0", EnvSenderBatchSize: "x", EnvSenderSendTimeout: "soon", EnvProviderRateLimit: "-1",
+		EnvProviderATimeout: "0s", EnvProviderBTimeout: "x", EnvProviderStatusTimeout: "-1s",
+		EnvBreakerFailures: "0", EnvBreakerOpenFor: "never",
 	}), NeedSender)
 	if err == nil {
 		t.Fatal("bad sender settings accepted")
 	}
-	for _, name := range []string{EnvSenderPoolSize, EnvSenderBatchSize, EnvSenderSendTimeout, EnvProviderRateLimit} {
+	for _, name := range []string{
+		EnvSenderPoolSize, EnvSenderBatchSize, EnvSenderSendTimeout, EnvProviderRateLimit,
+		EnvProviderATimeout, EnvProviderBTimeout, EnvProviderStatusTimeout, EnvBreakerFailures, EnvBreakerOpenFor,
+	} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error does not mention %s: %v", name, err)
 		}

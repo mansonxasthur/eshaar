@@ -2,6 +2,7 @@ package sender
 
 import (
 	"context"
+	"fmt"
 	"math"
 
 	"golang.org/x/time/rate"
@@ -25,7 +26,9 @@ func WithRateLimit(p ports.Provider, rps float64) ports.Provider {
 
 func (r rateLimited) Send(ctx context.Context, n domain.Notification) (string, error) {
 	if err := r.limiter.Wait(ctx); err != nil {
-		return "", err
+		// Nothing was sent, so this is not a provider timeout. %v keeps the
+		// context error from matching a deadline in the caller.
+		return "", fmt.Errorf("%w: outbound rate limit wait: %s", ports.ErrTransient, err.Error())
 	}
 	return r.Provider.Send(ctx, n)
 }

@@ -38,19 +38,38 @@ func run(log *slog.Logger) error {
 	return serve(ctx, cfg, log, defaultProviders(cfg))
 }
 
-// defaultProviders sends every channel through the mock provider, behind the
-// outbound rate limit. Phase 4 replaces it with a provider A and B per channel.
-func defaultProviders(cfg config.Config) map[domain.Channel]ports.Provider {
-	p := sender.WithRateLimit(mock.NewProvider("mock"), cfg.ProviderRateLimit)
-	providers := make(map[domain.Channel]ports.Provider)
+// defaultProviders gives every channel its own mock provider A and B, so one
+// channel's outage opens only that channel's breakers. Each is behind a circuit
+// breaker and, outside it, the outbound rate limit, so the limiter's own wait
+// errors never count against the breaker.
+func defaultProviders(cfg config.Config) map[domain.Channel]sender.Pair {
+	wrap := func(p ports.Provider) ports.Provider {
+		b := sender.WithBreaker(p, sender.BreakerConfig{FailureThreshold: cfg.BreakerFailures, OpenFor: cfg.BreakerOpenFor})
+		return sender.WithRateLimit(b, cfg.ProviderRateLimit)
+	}
+	providers := make(map[domain.Channel]sender.Pair)
 	for _, c := range domain.Channels() {
-		providers[c] = p
+		providers[c] = sender.Pair{A: wrap(mock.NewProvider("mock-a")), B: wrap(mock.NewProvider("mock-b"))}
 	}
 	return providers
 }
 
+// senderConfig maps the process configuration to the sender's.
+func senderConfig(cfg config.Config) sender.Config {
+	return sender.Config{
+		PoolSize:         cfg.SenderPoolSize,
+		SendTimeout:      cfg.SenderSendTimeout,
+		ProviderATimeout: cfg.ProviderATimeout,
+		ProviderBTimeout: cfg.ProviderBTimeout,
+		StatusTimeout:    cfg.ProviderStatusTimeout,
+		DrainTimeout:     cfg.SenderSendTimeout + 5*time.Second,
+		MinBackoff:       100 * time.Millisecond,
+		MaxBackoff:       5 * time.Second,
+	}
+}
+
 // serve wires the adapters to the sender and runs it until ctx is done.
-func serve(ctx context.Context, cfg config.Config, log *slog.Logger, providers map[domain.Channel]ports.Provider) error {
+func serve(ctx context.Context, cfg config.Config, log *slog.Logger, providers map[domain.Channel]sender.Pair) error {
 	store, err := postgres.NewStore(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -62,13 +81,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger, providers m
 	}
 	defer consumer.Close()
 
-	s, err := sender.New(consumer, store, providers, sender.Config{
-		PoolSize:     cfg.SenderPoolSize,
-		SendTimeout:  cfg.SenderSendTimeout,
-		DrainTimeout: cfg.SenderSendTimeout + 5*time.Second,
-		MinBackoff:   100 * time.Millisecond,
-		MaxBackoff:   5 * time.Second,
-	}, log)
+	s, err := sender.New(consumer, store, providers, senderConfig(cfg), log)
 	if err != nil {
 		return err
 	}

@@ -28,6 +28,12 @@ const (
 	EnvSenderBatchSize   = "SENDER_BATCH_SIZE"
 	EnvSenderSendTimeout = "SENDER_SEND_TIMEOUT"
 	EnvProviderRateLimit = "PROVIDER_RATE_LIMIT_RPS"
+
+	EnvProviderATimeout      = "PROVIDER_A_TIMEOUT"
+	EnvProviderBTimeout      = "PROVIDER_B_TIMEOUT"
+	EnvProviderStatusTimeout = "PROVIDER_STATUS_TIMEOUT"
+	EnvBreakerFailures       = "PROVIDER_BREAKER_FAILURES"
+	EnvBreakerOpenFor        = "PROVIDER_BREAKER_OPEN_FOR"
 )
 
 // Need selects the settings a process requires. Settings a process does not
@@ -58,8 +64,14 @@ type Config struct {
 	KafkaGroupID      string        // consumer group the senders join
 	SenderPoolSize    int           // concurrent channel sends per sender
 	SenderBatchSize   int           // most records read per poll
-	SenderSendTimeout time.Duration // limit for one provider call
+	SenderSendTimeout time.Duration // limit for a whole channel send, across both providers
 	ProviderRateLimit float64       // provider calls per second per sender
+
+	ProviderATimeout      time.Duration // limit for one call to provider A
+	ProviderBTimeout      time.Duration // limit for one call to provider B
+	ProviderStatusTimeout time.Duration // limit for the status check after A times out
+	BreakerFailures       int           // consecutive failures that open a provider's circuit breaker
+	BreakerOpenFor        time.Duration // how long an open breaker waits before probing
 }
 
 // Load reads the configuration through getenv (os.Getenv in production) and
@@ -98,9 +110,23 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 		if cfg.SenderBatchSize, err = positiveInt(getenv, EnvSenderBatchSize, "500"); err != nil {
 			errs = append(errs, err)
 		}
-		cfg.SenderSendTimeout, err = time.ParseDuration(valueOr(getenv(EnvSenderSendTimeout), "3s"))
-		if err != nil || cfg.SenderSendTimeout <= 0 {
-			errs = append(errs, fmt.Errorf("%s must be a positive duration such as 3s", EnvSenderSendTimeout))
+		for _, d := range []struct {
+			dst  *time.Duration
+			name string
+			def  string
+		}{
+			{&cfg.SenderSendTimeout, EnvSenderSendTimeout, "4500ms"},
+			{&cfg.ProviderATimeout, EnvProviderATimeout, "2s"},
+			{&cfg.ProviderBTimeout, EnvProviderBTimeout, "2s"},
+			{&cfg.ProviderStatusTimeout, EnvProviderStatusTimeout, "500ms"},
+			{&cfg.BreakerOpenFor, EnvBreakerOpenFor, "30s"},
+		} {
+			if *d.dst, err = positiveDuration(getenv, d.name, d.def); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if cfg.BreakerFailures, err = positiveInt(getenv, EnvBreakerFailures, "5"); err != nil {
+			errs = append(errs, err)
 		}
 		cfg.ProviderRateLimit, err = strconv.ParseFloat(valueOr(getenv(EnvProviderRateLimit), "1000"), 64)
 		if err != nil || math.IsNaN(cfg.ProviderRateLimit) || math.IsInf(cfg.ProviderRateLimit, 0) || cfg.ProviderRateLimit <= 0 {
@@ -129,6 +155,15 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 		return Config{}, fmt.Errorf("invalid configuration: %w", err)
 	}
 	return cfg, nil
+}
+
+// positiveDuration reads a duration above zero, using def when unset.
+func positiveDuration(getenv func(string) string, name, def string) (time.Duration, error) {
+	d, err := time.ParseDuration(valueOr(getenv(name), def))
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration such as %s", name, def)
+	}
+	return d, nil
 }
 
 // positiveInt reads an integer of at least 1, using def when unset.

@@ -16,11 +16,14 @@ import (
 
 // Config tunes the sender.
 type Config struct {
-	PoolSize     int           // concurrent channel sends; a full pool stops the consume loop
-	SendTimeout  time.Duration // limit for one provider call
-	DrainTimeout time.Duration // how long Run waits for in-flight sends on shutdown
-	MinBackoff   time.Duration // first wait after a failed poll or insert
-	MaxBackoff   time.Duration // cap on that wait
+	PoolSize         int           // concurrent channel sends; a full pool stops the consume loop
+	SendTimeout      time.Duration // limit for a whole channel send, across both providers
+	ProviderATimeout time.Duration // limit for one call to provider A
+	ProviderBTimeout time.Duration // limit for one call to provider B
+	StatusTimeout    time.Duration // limit for the status check after A times out
+	DrainTimeout     time.Duration // how long Run waits for in-flight sends on shutdown
+	MinBackoff       time.Duration // first wait after a failed poll or insert
+	MaxBackoff       time.Duration // cap on that wait
 }
 
 // recordTimeout bounds an outcome write, which must not share the send's
@@ -31,7 +34,7 @@ const recordTimeout = 5 * time.Second
 type Sender struct {
 	consumer  ports.Consumer
 	store     ports.NotificationStore
-	providers map[domain.Channel]ports.Provider
+	providers map[domain.Channel]Pair
 	cfg       Config
 	log       *slog.Logger
 	now       func() time.Time
@@ -40,17 +43,26 @@ type Sender struct {
 	wg    sync.WaitGroup
 }
 
-// New returns a Sender. providers maps each channel to the provider that
-// delivers it; a channel without one has its rows failed.
-func New(consumer ports.Consumer, store ports.NotificationStore, providers map[domain.Channel]ports.Provider, cfg Config, log *slog.Logger) (*Sender, error) {
+// New returns a Sender. providers maps each channel to its provider pair; a
+// channel without one has its rows failed.
+func New(consumer ports.Consumer, store ports.NotificationStore, providers map[domain.Channel]Pair, cfg Config, log *slog.Logger) (*Sender, error) {
 	if cfg.PoolSize < 1 {
 		return nil, errors.New("sender: pool size must be at least 1")
 	}
-	if cfg.SendTimeout <= 0 {
-		return nil, errors.New("sender: send timeout must be positive")
+	if cfg.SendTimeout <= 0 || cfg.ProviderATimeout <= 0 || cfg.ProviderBTimeout <= 0 || cfg.StatusTimeout <= 0 {
+		return nil, errors.New("sender: send, provider and status timeouts must be positive")
 	}
 	if cfg.MinBackoff <= 0 || cfg.MaxBackoff < cfg.MinBackoff {
 		return nil, errors.New("sender: backoff needs 0 < min <= max")
+	}
+	for c, pair := range providers {
+		if pair.A == nil {
+			return nil, fmt.Errorf("sender: channel %s has no provider A", c)
+		}
+	}
+	if need := cfg.ProviderATimeout + cfg.StatusTimeout + cfg.ProviderBTimeout; cfg.SendTimeout < need {
+		log.Warn("send timeout is shorter than provider A + status check + provider B; a slow A can leave B no time",
+			"send_timeout", cfg.SendTimeout, "needed", need)
 	}
 	return &Sender{
 		consumer:  consumer,
@@ -134,32 +146,21 @@ func (s *Sender) dispatch(ctx context.Context, rows []domain.Notification) {
 	}
 }
 
-// send makes the provider call and records its outcome. It does not stop when
+// send runs the fallback flow and records its outcome. It does not stop when
 // ctx is cancelled, so a shutdown does not leave a sent notification unrecorded.
 func (s *Sender) send(ctx context.Context, n domain.Notification) {
 	base := context.WithoutCancel(ctx)
 	log := s.log.With("notification_id", n.ID, "idempotency_key", n.IdempotencyKey, "channel", n.Channel)
 
-	provider, ok := s.providers[n.Channel]
-	if !ok {
-		s.record(base, log, func(ctx context.Context) error {
-			return s.store.MarkFailed(ctx, n.ID, "no provider for channel "+string(n.Channel))
-		})
-		return
-	}
-
-	sendCtx, cancel := context.WithTimeout(base, s.cfg.SendTimeout)
-	messageID, err := provider.Send(sendCtx, n)
-	cancel()
-	if err != nil {
-		log.WarnContext(ctx, "send failed", "provider", provider.Name(), "error", err)
-		s.record(base, log, func(ctx context.Context) error {
-			return s.store.MarkFailed(ctx, n.ID, failureReason(err))
-		})
-		return
-	}
+	out := s.deliver(base, log, n, s.providers[n.Channel])
 	s.record(base, log, func(ctx context.Context) error {
-		return s.store.MarkAccepted(ctx, n.ID, provider.Name(), messageID)
+		switch out.state {
+		case domain.StateAccepted:
+			return s.store.MarkAccepted(ctx, n.ID, out.provider, out.messageID)
+		case domain.StateUnresolved:
+			return s.store.MarkUnresolved(ctx, n.ID, failureReason(out.reason))
+		}
+		return s.store.MarkFailed(ctx, n.ID, failureReason(out.reason))
 	})
 }
 
@@ -168,8 +169,8 @@ const maxReasonLen = 500
 
 // failureReason is the text stored in failure_reason. Providers must keep
 // contact details out of their errors; the cap bounds what a verbose one adds.
-func failureReason(err error) string {
-	r := []rune(err.Error())
+func failureReason(text string) string {
+	r := []rune(text)
 	if len(r) > maxReasonLen {
 		r = r[:maxReasonLen]
 	}
