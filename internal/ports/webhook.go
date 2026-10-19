@@ -10,12 +10,20 @@ import (
 // WebhookStore saves provider events and applies their final state to the
 // notifications.
 type WebhookStore interface {
-	// RecordEvents saves the events in one transaction and applies each new
-	// event's final state to the notification it resolves to. An event whose
-	// (provider, event id) already exists is skipped silently. An event that
-	// resolves to no notification, or to one that is not yet accepted, is still
-	// saved, and ResolvePending links it later. A state the row cannot move to,
-	// because it is already final or still pending, is not an error.
+	// RecordEvents saves the events in one statement and applies each new
+	// event's final state to the notification it resolves to.
+	//
+	// An event resolves by the provider's message id to the row that provider
+	// accepted, or, when no row holds that id, by idempotency key and channel to
+	// an unresolved row that never got a message id. A row accepted by one
+	// provider is never matched by key, so another provider cannot finalize it.
+	//
+	// An event whose (provider, event id) already exists is skipped silently.
+	// An event that resolves to no notification is still saved, and
+	// ResolvePending links it later; so is one for a row that is not yet
+	// accepted, since a pending row has no message id to match. A state the row
+	// cannot move to, because it is already final, is not an error. Events can
+	// stay unlinked indefinitely if their row never appears.
 	//
 	// Events are validated before they reach the store, so a batch holds only
 	// well-formed ones. The first event stored for a (provider, event id) wins:

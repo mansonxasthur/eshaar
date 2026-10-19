@@ -18,9 +18,13 @@ import (
 // and the tests that play a provider (the end-to-end test of cmd/webhook) both
 // use it, so the scheme lives in one place.
 func Sign(secret string, body []byte) string {
+	return hex.EncodeToString(sum(secret, body))
+}
+
+func sum(secret string, body []byte) []byte {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
+	return mac.Sum(nil)
 }
 
 // Verifier checks webhook signatures with the secret of each provider.
@@ -75,8 +79,7 @@ func (v *Verifier) Verify(provider string, body []byte, signature string) error 
 		secret = unknownSecret
 	}
 	got, err := hex.DecodeString(signature)
-	want, _ := hex.DecodeString(Sign(secret, body))
-	ok := err == nil && hmac.Equal(got, want)
+	ok := err == nil && hmac.Equal(got, sum(secret, body))
 	switch {
 	case !known:
 		return ports.ErrUnknownProvider

@@ -67,6 +67,13 @@ func TestParseEventRejectsBadBodies(t *testing.T) {
 		"number field":        `{"message_id":1,"channel":"sms","status":"delivered"}`,
 		"trailing data":       goodBody + `{}`,
 		"trailing garbage":    goodBody + ` x`,
+		"huge exponent":       `{"message_id":"m","channel":"sms","status":"delivered","x":1e999999999}`,
+		"huge exponent plus":  `{"message_id":"m","channel":"sms","status":"delivered","x":[1E+400]}`,
+		"tiny exponent":       `{"message_id":"m","channel":"sms","status":"delivered","x":{"y":1e-999999999}}`,
+		"very long number":    `{"message_id":"m","channel":"sms","status":"delivered","x":` + strings.Repeat("9", 65) + `}`,
+		"upper-case key":      `{"message_id":"m","channel":"sms","STATUS":"delivered"}`,
+		"mixed-case key":      `{"message_id":"m","channel":"sms","Status":"delivered"}`,
+		"null status":         `{"message_id":"m","channel":"sms","status":null}`,
 		"no message id":       `{"channel":"sms","status":"delivered"}`,
 		"empty message id":    `{"message_id":"","channel":"sms","status":"delivered"}`,
 		"no channel":          `{"message_id":"m","status":"delivered"}`,
@@ -145,5 +152,46 @@ func TestParseEventAcceptsEscapesPostgresCanStore(t *testing.T) {
 		if _, err := ParseEvent("sms-a", []byte(body)); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+func TestParseEventReadsKeysExactlyAndTakesTheLastDuplicate(t *testing.T) {
+	// Postgres keeps the last of two equal keys, so the parser must as well.
+	ev, err := ParseEvent("sms-a", []byte(`{"message_id":"m","channel":"sms","status":"failed","status":"delivered","Reason":"ignored"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != domain.StateDelivered || ev.Reason != "" {
+		t.Errorf("status %s reason %q", ev.Status, ev.Reason)
+	}
+}
+
+func TestParseEventRejectsABodyEndingInABackslash(t *testing.T) {
+	if err := checkStorable([]byte(`{"a":"x\`)); !errors.Is(err, ports.ErrInvalidEvent) {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestParseEventAcceptsOrdinaryNumbersAndNumbersInsideStrings(t *testing.T) {
+	for name, extra := range map[string]string{
+		"integer":            `1`,
+		"negative decimal":   `-3.25`,
+		"small exponent":     `12e2`,
+		"max exponent":       `1e300`,
+		"exponent in string": `"1e999999999 and 9999999999999999999999999999999999999999999999999999999999999999999"`,
+		"digits after quote": `"a\"1e999999999"`,
+		"in an array":        `[1, 2.5, -0.5e-3]`,
+	} {
+		body := `{"message_id":"m","channel":"sms","status":"delivered","x":` + extra + `}`
+		if _, err := ParseEvent("sms-a", []byte(body)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestParseEventTreatsNullOptionalFieldsAsAbsent(t *testing.T) {
+	ev, err := ParseEvent("sms-a", []byte(`{"event_id":null,"message_id":"m","channel":"sms","status":"delivered","reason":null}`))
+	if err != nil || ev.EventID != "" || ev.Reason != "" {
+		t.Errorf("event = %+v, err = %v", ev, err)
 	}
 }

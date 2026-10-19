@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -20,15 +21,38 @@ const maxIDLength = 255
 // sender writes.
 const maxReasonRunes = 500
 
-// payload is the JSON body of an event. Unknown fields are ignored (the raw
-// body is kept whole), so a provider can add fields without breaking us.
+// payload holds the fields ParseEvent reads from the body.
 type payload struct {
-	EventID        string `json:"event_id"`
-	MessageID      string `json:"message_id"`
-	IdempotencyKey string `json:"idempotency_key"`
-	Channel        string `json:"channel"`
-	Status         string `json:"status"`
-	Reason         string `json:"reason"`
+	EventID        string
+	MessageID      string
+	IdempotencyKey string
+	Channel        string
+	Status         string
+	Reason         string
+}
+
+// field returns where the JSON key goes, or nil for a key we do not read. Keys
+// are matched exactly, not case-insensitively as a struct decode would, because
+// the Postgres store reads the same keys from the stored payload with a
+// case-sensitive operator: the two must agree on which events carry a status
+// and a key. Unknown fields are ignored (the raw body is kept whole), so a
+// provider can add fields. A JSON null reads as an absent field.
+func (p *payload) field(key string) *string {
+	switch key {
+	case "event_id":
+		return &p.EventID
+	case "message_id":
+		return &p.MessageID
+	case "idempotency_key":
+		return &p.IdempotencyKey
+	case "channel":
+		return &p.Channel
+	case "status":
+		return &p.Status
+	case "reason":
+		return &p.Reason
+	}
+	return nil
 }
 
 // ParseEvent reads the body of a webhook from provider. event_id is optional
@@ -45,13 +69,21 @@ func ParseEvent(provider string, body []byte) (domain.WebhookEvent, error) {
 	if !utf8.Valid(body) {
 		return domain.WebhookEvent{}, invalid("body is not valid UTF-8")
 	}
-	var p payload
+	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(body))
-	if err := dec.Decode(&p); err != nil {
-		return domain.WebhookEvent{}, invalid("body is not a JSON object with string fields")
+	if err := dec.Decode(&raw); err != nil || raw == nil {
+		return domain.WebhookEvent{}, invalid("body is not a JSON object")
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return domain.WebhookEvent{}, invalid("body has data after the JSON object")
+	}
+	var p payload
+	for name, v := range raw {
+		if dst := p.field(name); dst != nil {
+			if err := json.Unmarshal(v, dst); err != nil {
+				return domain.WebhookEvent{}, invalid(name + " must be a string")
+			}
+		}
 	}
 
 	if err := checkStorable(body); err != nil {
@@ -104,38 +136,86 @@ func truncate(s string, n int) string {
 	return string([]rune(s)[:n])
 }
 
-// checkStorable rejects the \u escapes Postgres refuses in jsonb: \u0000, and
-// a surrogate that is not half of a high and low pair. Go's decoder accepts
-// both, so they are checked on the raw text. body is already valid JSON, so
-// every backslash is inside a string, and an escaped backslash followed by
-// u0000 is skipped as the two-byte escape it is.
+// maxNumberLength and maxExponent bound the numbers of a body. Postgres jsonb
+// stores arbitrary decimals but fails on an exponent beyond its numeric range
+// (1e999999999), which Go's decoder leaves as text. Events carry no numbers we
+// read, so the bounds are generous.
+const (
+	maxNumberLength = 64
+	maxExponent     = 300
+)
+
+// checkStorable rejects what Postgres refuses in jsonb but Go's decoder accepts:
+// the \u0000 escape, a surrogate escape that is not half of a high and low
+// pair, and a number with an exponent out of range. It scans the raw text once.
+// body is already valid JSON, so every backslash is inside a string, an escaped
+// backslash followed by u0000 is skipped as the two-byte escape it is, and a
+// digit outside a string starts a number.
 func checkStorable(body []byte) error {
+	inString := false
 	for i := 0; i < len(body); i++ {
-		if body[i] != '\\' {
+		c := body[i]
+		if !inString {
+			switch {
+			case c == '"':
+				inString = true
+			case c == '-' || (c >= '0' && c <= '9'):
+				end := i + 1
+				for end < len(body) && strings.IndexByte("0123456789+-.eE", body[end]) >= 0 {
+					end++
+				}
+				if err := checkNumber(body[i:end]); err != nil {
+					return err
+				}
+				i = end - 1
+			}
 			continue
 		}
-		if body[i+1] != 'u' {
-			i++ // skip the escaped character, which may itself be a backslash
-			continue
-		}
-		r, ok := hexRune(body[i+2:])
-		switch {
-		case !ok:
-			return invalid("body has a malformed \\u escape")
-		case r == 0:
-			return invalid("body contains a NUL character")
-		case r >= 0xDC00 && r <= 0xDFFF:
-			return invalid("body has a low surrogate escape with no high surrogate before it")
-		case r >= 0xD800 && r <= 0xDBFF:
-			if len(body) < i+12 || body[i+6] != '\\' || body[i+7] != 'u' {
-				return invalid("body has a high surrogate escape with no low surrogate after it")
+		switch c {
+		case '"':
+			inString = false
+		case '\\':
+			if i+1 >= len(body) {
+				return invalid("body ends inside an escape")
 			}
-			if low, ok := hexRune(body[i+8:]); !ok || low < 0xDC00 || low > 0xDFFF {
-				return invalid("body has a high surrogate escape with no low surrogate after it")
+			if body[i+1] != 'u' {
+				i++ // skip the escaped character, which may itself be a backslash
+				continue
 			}
-			i += 6 // the low half is skipped with the loop's own step below
+			r, ok := hexRune(body[i+2:])
+			switch {
+			case !ok:
+				return invalid("body has a malformed \\u escape")
+			case r == 0:
+				return invalid("body contains a NUL character")
+			case r >= 0xDC00 && r <= 0xDFFF:
+				return invalid("body has a low surrogate escape with no high surrogate before it")
+			case r >= 0xD800 && r <= 0xDBFF:
+				if len(body) < i+12 || body[i+6] != '\\' || body[i+7] != 'u' {
+					return invalid("body has a high surrogate escape with no low surrogate after it")
+				}
+				if low, ok := hexRune(body[i+8:]); !ok || low < 0xDC00 || low > 0xDFFF {
+					return invalid("body has a high surrogate escape with no low surrogate after it")
+				}
+				i += 6 // the low half is skipped with the loop's own step below
+			}
+			i += 5
 		}
-		i += 5
+	}
+	return nil
+}
+
+// checkNumber rejects a number that is too long or has an exponent beyond
+// maxExponent.
+func checkNumber(num []byte) error {
+	if len(num) > maxNumberLength {
+		return invalid("body has a number longer than 64 characters")
+	}
+	if e := bytes.IndexAny(num, "eE"); e >= 0 {
+		exp, err := strconv.Atoi(strings.TrimPrefix(string(num[e+1:]), "+"))
+		if err != nil || exp > maxExponent || exp < -maxExponent {
+			return invalid("body has a number with an exponent out of range")
+		}
 	}
 	return nil
 }
