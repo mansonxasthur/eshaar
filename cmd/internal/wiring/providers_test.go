@@ -1,6 +1,8 @@
 package wiring
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -92,5 +94,23 @@ func TestBuildRoutesOrdersByPriority(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "first,second,third" {
 		t.Errorf("chain = %v, want priority order", got)
+	}
+}
+
+func TestBuildRoutesAppliesMockBehavior(t *testing.T) {
+	specs := allChannels(t, func(s config.Providers) {
+		a := s["sms"][0]
+		a.Mock = config.Mock{ErrorRate: 1}
+		s["sms"][0] = a
+	})
+	routes, err := BuildRoutes(specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := routes[domain.ChannelSMS][0].Provider.Send(context.Background(), domain.Notification{}); !errors.Is(err, ports.ErrTransient) {
+		t.Errorf("sms-a with error_rate 1: err = %v", err)
+	}
+	if _, err := routes[domain.ChannelSMS][1].Provider.Send(context.Background(), domain.Notification{}); err != nil {
+		t.Errorf("sms-b: %v", err)
 	}
 }

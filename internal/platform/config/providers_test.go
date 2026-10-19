@@ -210,3 +210,31 @@ func TestShownHidesCredentialNames(t *testing.T) {
 		}
 	}
 }
+
+func TestParseProvidersReadsAndChecksMockBehavior(t *testing.T) {
+	const ok = `
+sms:
+  - name: sms-a
+    priority: 1
+    rps: 10
+    timeout: 2s
+    breaker: {failures: 5, open_for: 30s}
+    mock: {latency: ${LAT:-0s}, error_rate: ${ERR:-0}}
+`
+	p, err := ParseProviders([]byte(ok), env(map[string]string{"LAT": "50ms", "ERR": "0.25"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := p["sms"][0].Mock; m.Latency != 50*time.Millisecond || m.ErrorRate != 0.25 {
+		t.Errorf("mock = %+v", m)
+	}
+	for name, vars := range map[string]map[string]string{
+		"error rate above 1": {"ERR": "1.5"},
+		"negative rate":      {"ERR": "-0.1"},
+		"negative latency":   {"LAT": "-1s"},
+	} {
+		if _, err := ParseProviders([]byte(ok), env(vars)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

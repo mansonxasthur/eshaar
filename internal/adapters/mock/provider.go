@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mrand "math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,6 +75,7 @@ type Provider struct {
 
 	delay     time.Duration
 	err       error
+	errorRate float64 // share of default-behavior sends that fail with ports.ErrTransient
 	script    []Step
 	statusErr error
 
@@ -106,6 +108,12 @@ func WithDelay(d time.Duration) Option { return func(p *Provider) { p.delay = d 
 
 // WithError makes every send fail with err.
 func WithError(err error) Option { return func(p *Provider) { p.err = err } }
+
+// WithErrorRate makes a share of the sends (0 to 1) fail with a transient
+// error, chosen at random per call; the rest follow the other options. It
+// models a provider that is partly down, for the load test. It applies only
+// when WithError is not set, and scripted steps take precedence over it.
+func WithErrorRate(rate float64) Option { return func(p *Provider) { p.errorRate = rate } }
 
 // WithRateLimited makes every send answer with a rate-limit response.
 func WithRateLimited() Option {
@@ -202,7 +210,11 @@ func (p *Provider) nextStep() Step {
 	if i := int(p.calls.Add(1)) - 1; i < len(p.script) {
 		return p.script[i]
 	}
-	return Step{Delay: p.delay, Err: p.err}
+	err := p.err
+	if err == nil && p.errorRate > 0 && mrand.Float64() < p.errorRate {
+		err = fmt.Errorf("mock %s: %w", p.name, ports.ErrTransient)
+	}
+	return Step{Delay: p.delay, Err: err}
 }
 
 func (p *Provider) take(n domain.Notification) string {
