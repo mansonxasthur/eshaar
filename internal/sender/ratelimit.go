@@ -20,7 +20,7 @@ type rateLimited struct {
 // WithRateLimit wraps p so it is called at most rps times a second. The wait
 // counts against the send's timeout.
 func WithRateLimit(p ports.Provider, rps float64) ports.Provider {
-	return rateLimited{Provider: p, limiter: rate.NewLimiter(rate.Limit(rps), max(1, int(math.Ceil(rps))))}
+	return keepStatus(rateLimited{Provider: p, limiter: rate.NewLimiter(rate.Limit(rps), max(1, int(math.Ceil(rps))))}, p)
 }
 
 func (r rateLimited) Send(ctx context.Context, n domain.Notification) (string, error) {
