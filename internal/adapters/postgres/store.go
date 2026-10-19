@@ -136,3 +136,15 @@ WHERE id = $1 AND state = 'pending'`, id, state, reason)
 	}
 	return nil
 }
+
+// RecordLastProvider implements ports.NotificationStore.
+func (s *Store) RecordLastProvider(ctx context.Context, id, provider string) error {
+	_, err := s.pool.Exec(ctx, `
+UPDATE notifications
+SET last_provider = $2, updated_at = now()
+WHERE id = $1 AND state = 'pending'`, id, provider)
+	if err != nil {
+		return fmt.Errorf("record last provider of %s: %w", id, err)
+	}
+	return nil
+}

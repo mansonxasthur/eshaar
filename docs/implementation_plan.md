@@ -70,7 +70,7 @@ The goal is a mock provider and the fallback logic from provider A to provider B
 - On a timeout, make one final status check against that provider with the idempotency key if it supports it, then switch to the next. If it cannot check, switch anyway.
 - On a rate-limit response, switch to the next provider without retrying.
 - Wrap each provider in a circuit breaker for transient errors and timeouts only.
-- Save the outcome when the chain ends: `accepted` with `provider_message_id`, `unresolved` if nothing accepted and a provider timed out, or `failed` if every provider was tried and refused. A row where no provider was tried (open breakers, no time left) stays `pending` for the janitor. Log every attempt.
+- Save the outcome when the chain ends: `accepted` with `provider_message_id`, `unresolved` if nothing accepted and a provider timed out, or `failed` if every provider was tried and refused. A row where some provider was never tried (open breakers, no time left) stays `pending` with `last_provider` set, for the janitor to resume from. Log every attempt.
 
 **Tests:** unit tests for each fallback branch (failure, timeout with a positive status check, timeout with no check, rate limit, both timing out, a chain of three) and for the circuit breaker opening and closing, plus an end-to-end test of the outcomes reaching the rows.
 
@@ -94,15 +94,15 @@ The goal is an endpoint that validates provider events and records the final del
 
 The goal is two background jobs that recover stalled rows and mark the ones that never complete as `unresolved`.
 
-- Add an `attempts` column (migration 0003) that counts janitor attempts, and replace the two partial indexes of migration 0001 with `(COALESCE(claimed_at, created_at)) WHERE state = 'pending' AND attempts < 3` and `(claimed_at) WHERE state = 'pending' AND attempts >= 3`.
+- Add an `attempts` column (migration 0004; 0003 added `last_provider` in Phase 4) that counts janitor attempts, and replace the two partial indexes of migration 0001 with `(COALESCE(claimed_at, created_at)) WHERE state = 'pending' AND attempts < 3` and `(claimed_at) WHERE state = 'pending' AND attempts >= 3`.
 - **Recovery janitor, every 5 seconds:** atomically claim a batch of `pending` rows with `attempts < 3` where `claimed_at` is null and `created_at` is older than 10 seconds, or `claimed_at` is older than 10 seconds. Set `claimed_at` and increment `attempts` in the same statement.
-- **Re-drive, status check first:** ask every provider in the channel's chain that supports it whether it already took the idempotency key and accept with that provider's message id if so. Otherwise run the normal fallback chain and write the outcome, guarded by `state = pending`.
+- **Re-drive, resuming from `last_provider`:** start the channel's chain at the last provider the sender called (the first provider if empty or no longer in the chain). If that provider supports a status check, ask whether it already took the idempotency key and accept with its message id if so. Otherwise send through it and fail over to the later providers, and write the outcome guarded by `state = pending`.
 - **Sweeper, every 10 minutes:** mark `pending` rows with `attempts >= 3` and `claimed_at` older than 10 seconds as `unresolved`, with a `failure_reason`.
 - Make each claim a single atomic Postgres statement (UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING) so two janitor instances never take the same rows.
 - Reuse the sender's delivery code: extract it into an exported `sender.Deliverer` that `cmd/janitor` wires into `internal/janitor`, and move the providers-file wiring from `cmd/sender` to a package under `cmd/internal` that both commands use. A Kafka re-publish would not work, because the sender does not send rows that already exist.
 - Settings: attempt limit (3), stale age (10 seconds), janitor tick (5 seconds), sweeper tick (10 minutes), batch size and re-drive concurrency.
 
-**Tests:** unit tests for both selection rules including the `attempts` limit and the 10-second age on the null case, the sweeper touching only exhausted rows and setting a reason, a re-drive that is accepted by the status check without a send, an end-to-end test that simulates a sender crash after the acknowledgement and verifies recovery, and a concurrency test with two janitors competing for the same rows.
+**Tests:** unit tests for both selection rules including the `attempts` limit and the 10-second age on the null case, the sweeper touching only exhausted rows and setting a reason, a re-drive that resumes from `last_provider`, one that is accepted by the status check without a send, an end-to-end test that simulates a sender crash after the acknowledgement and verifies recovery, and a concurrency test with two janitors competing for the same rows.
 
 ## Phase 7: Load test, API docs and solution document
 

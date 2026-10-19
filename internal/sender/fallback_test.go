@@ -331,3 +331,26 @@ func TestFallbackChecksStatusOfEveryProviderButTheLast(t *testing.T) {
 		t.Errorf("outcome = %+v, C checks %d", out, c.checks.Load())
 	}
 }
+
+// A pending outcome names the last provider that was actually called, never one
+// skipped by an open breaker, so the janitor resumes from a provider that answered.
+func TestFallbackPendingReportsTheLastProviderCalled(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b error
+		want string
+	}{
+		{"rejected then open breaker", errRejected, ErrCircuitOpen, "a"},
+		{"open breaker then rejected", ErrCircuitOpen, errRejected, "b"},
+		{"transient then open breaker", errDown, ErrCircuitOpen, "a"},
+		{"both breakers open", ErrCircuitOpen, ErrCircuitOpen, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := deliver(fallbackConfig(), chain(&stub{name: "a", send: fails(c.a)}, &stub{name: "b", send: fails(c.b)}))
+			if out.state != domain.StatePending || out.lastTried != c.want {
+				t.Errorf("outcome = %+v, want pending with last provider %q", out, c.want)
+			}
+		})
+	}
+}

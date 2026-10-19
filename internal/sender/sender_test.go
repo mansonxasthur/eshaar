@@ -85,10 +85,11 @@ type fakeStore struct {
 	accepted   map[string][2]string           // id -> provider, message id
 	failed     map[string]string              // id -> reason
 	unresolved map[string]string              // id -> reason
+	lastTried  map[string]string              // id -> last provider recorded on a pending row
 }
 
 func newStore(rec *recorder) *fakeStore {
-	return &fakeStore{rec: rec, rows: map[string]domain.Notification{}, accepted: map[string][2]string{}, failed: map[string]string{}, unresolved: map[string]string{}}
+	return &fakeStore{rec: rec, rows: map[string]domain.Notification{}, accepted: map[string][2]string{}, failed: map[string]string{}, unresolved: map[string]string{}, lastTried: map[string]string{}}
 }
 
 func (s *fakeStore) InsertPending(_ context.Context, rows []domain.Notification) ([]domain.Notification, error) {
@@ -133,6 +134,13 @@ func (s *fakeStore) MarkUnresolved(_ context.Context, id, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.unresolved[id] = reason
+	return nil
+}
+
+func (s *fakeStore) RecordLastProvider(_ context.Context, id, provider string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastTried[id] = provider
 	return nil
 }
 
@@ -453,7 +461,24 @@ func TestNoProviderTriedLeavesRowPending(t *testing.T) {
 	}
 	h.store.mu.Lock()
 	defer h.store.mu.Unlock()
-	if len(h.store.accepted)+len(h.store.failed)+len(h.store.unresolved) != 0 {
+	if len(h.store.accepted)+len(h.store.failed)+len(h.store.unresolved)+len(h.store.lastTried) != 0 {
 		t.Error("a send that never reached a provider was recorded")
+	}
+}
+
+func TestPendingRowRecordsTheLastProviderCalled(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.sender.providers[domain.ChannelSMS] = []Route{
+		{Provider: &stub{name: "sms-a", send: fails(errRejected)}, Timeout: time.Second},
+		{Provider: &stub{name: "sms-b", send: fails(ErrCircuitOpen)}, Timeout: time.Second},
+	}
+	h.sender.send(context.Background(), domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS})
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if got := h.store.lastTried["id1"]; got != "sms-a" {
+		t.Errorf("last provider = %q, want sms-a", got)
+	}
+	if len(h.store.accepted)+len(h.store.failed)+len(h.store.unresolved) != 0 {
+		t.Error("a pending row was given an outcome")
 	}
 }

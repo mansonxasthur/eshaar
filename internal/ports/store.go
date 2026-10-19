@@ -25,4 +25,9 @@ type NotificationStore interface {
 	// delivery is uncertain because a provider timed out. It does nothing if the
 	// row is no longer pending.
 	MarkUnresolved(ctx context.Context, id, reason string) error
+
+	// RecordLastProvider notes, on a row that stays pending, the last provider
+	// the send called, so the janitor can resume the chain from it. It does
+	// nothing if the row is no longer pending.
+	RecordLastProvider(ctx context.Context, id, provider string) error
 }

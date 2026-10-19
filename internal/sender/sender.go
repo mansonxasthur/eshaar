@@ -174,10 +174,17 @@ func (s *Sender) send(ctx context.Context, n domain.Notification) {
 	case domain.StateFailed:
 		write = func(ctx context.Context) error { return s.store.MarkFailed(ctx, n.ID, failureReason(out.reason)) }
 	default:
-		// Pending: no provider was tried, so there is nothing to record and
-		// the row stays pending for the janitor. Any other state is a bug and
-		// is treated the same way, never as a failure.
-		log.WarnContext(ctx, "no outcome to record; row stays pending for the janitor", "state", out.state, "reason", out.reason)
+		// Pending: some provider was never tried, so there is no outcome and the
+		// row stays pending for the janitor, which resumes from the last provider
+		// called. Any other state is a bug and is treated the same way, never as
+		// a failure.
+		log.WarnContext(ctx, "no outcome to record; row stays pending for the janitor",
+			"state", out.state, "last_provider", out.lastTried, "reason", out.reason)
+		if out.lastTried != "" {
+			s.record(base, log, func(ctx context.Context) error {
+				return s.store.RecordLastProvider(ctx, n.ID, out.lastTried)
+			})
+		}
 		return
 	}
 	s.record(base, log, write)

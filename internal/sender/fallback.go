@@ -49,10 +49,14 @@ func kindOf(err error) kind {
 
 // outcome is what a channel send ends in.
 type outcome struct {
-	state     domain.State // accepted, failed or unresolved; pending means write nothing
+	state     domain.State // accepted, failed or unresolved; pending means no outcome to write
 	provider  string       // accepted only
 	messageID string       // accepted only
-	reason    string       // failed and unresolved
+	reason    string       // failed, unresolved and pending
+
+	// lastTried is, for a pending outcome, the last provider that was actually
+	// called, empty if none was. The janitor resumes the chain from it.
+	lastTried string
 }
 
 // deliver runs the fallback flow for one notification over its channel's chain
@@ -70,7 +74,8 @@ type outcome struct {
 //   - Nothing accepted, no timeout, but some provider was never tried (its
 //     breaker was open or the deadline had passed): no outcome, and the row stays
 //     pending so the janitor re-drives it. Marking it failed would lose a
-//     message that nothing was ever sent for.
+//     message that nothing was ever sent for. The last provider actually called
+//     is returned so the janitor can resume from it.
 //   - Nothing accepted and every provider was tried and refused it outright:
 //     failed.
 //
@@ -90,6 +95,7 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 
 	var reasons []string
 	uncertain, skipped := false, false
+	var lastTried string
 	for i, route := range chain {
 		name := route.Provider.Name()
 		if ctx.Err() != nil {
@@ -99,6 +105,9 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 			continue
 		}
 		id, err := s.attempt(ctx, log, n, i+1, route)
+		if !errors.Is(err, ErrCircuitOpen) {
+			lastTried = name // an open breaker means the provider was never called
+		}
 		if err == nil {
 			return outcome{state: domain.StateAccepted, provider: name, messageID: id}
 		}
@@ -123,7 +132,7 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 	case uncertain:
 		return outcome{state: domain.StateUnresolved, reason: reason}
 	case skipped:
-		return outcome{state: domain.StatePending, reason: reason}
+		return outcome{state: domain.StatePending, reason: reason, lastTried: lastTried}
 	}
 	return outcome{state: domain.StateFailed, reason: reason}
 }
