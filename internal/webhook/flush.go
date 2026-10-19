@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mansonxasthur/eshaar/internal/domain"
+	"github.com/mansonxasthur/eshaar/internal/ports"
 )
 
 // isolateAfter is how many events in a row may fail on their own, after their
@@ -14,13 +15,24 @@ import (
 // database is down every retry would fail and wait.
 const isolateAfter = 2
 
-// flushLoop takes events from the queue, gathers a batch of up to BatchSize
-// for at most FlushInterval from its first event, and saves it. It returns when
-// the queue is closed and empty.
+// flushLoop takes events from the queue, gathers a batch of up to BatchSize for
+// at most FlushInterval from its first event, and saves it. When told to stop
+// it saves what is still queued and returns.
 func (s *Service) flushLoop() {
 	for {
-		first, ok := <-s.queue
-		if !ok {
+		// Stop wins over a ready queue, so a stopping flusher drains in full
+		// batches and does not flush one event at a time.
+		select {
+		case <-s.stop:
+			s.drain()
+			return
+		default:
+		}
+		var first *item
+		select {
+		case first = <-s.queue:
+		case <-s.stop:
+			s.drain()
 			return
 		}
 		batch := []*item{first}
@@ -28,16 +40,44 @@ func (s *Service) flushLoop() {
 	fill:
 		for len(batch) < s.cfg.BatchSize {
 			select {
-			case it, ok := <-s.queue:
-				if !ok {
-					break fill
-				}
+			case it := <-s.queue:
 				batch = append(batch, it)
 			case <-timer.C:
+				break fill
+			case <-s.stop:
 				break fill
 			}
 		}
 		timer.Stop()
+		s.flush(batch)
+	}
+}
+
+// drain saves what is queued, in batches, without waiting for more. It stops
+// starting batches after FlushTimeout and answers the rest ErrShuttingDown, so a
+// failing database cannot hold the shutdown past its grace period; those
+// providers retry.
+func (s *Service) drain() {
+	deadline := time.Now().Add(s.cfg.FlushTimeout)
+	for {
+		var batch []*item
+		for len(batch) < s.cfg.BatchSize {
+			select {
+			case it := <-s.queue:
+				batch = append(batch, it)
+				continue
+			default:
+			}
+			break
+		}
+		if len(batch) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.log.Error("shutdown drain ran out of time; events left unsaved, their providers will retry", "events", len(batch))
+			answer(batch, ports.ErrShuttingDown)
+			continue
+		}
 		s.flush(batch)
 	}
 }

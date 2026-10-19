@@ -36,10 +36,6 @@ type Config struct {
 // big backlog cannot keep it from noticing a shutdown.
 const maxResolvePasses = 20
 
-// ErrShuttingDown is returned to a request that arrives once the service has
-// begun to stop. The endpoint answers 503, so the provider retries.
-var ErrShuttingDown = errors.New("webhook service is shutting down")
-
 // Service checks and parses webhooks, saves them in batches and links the ones
 // that arrived before their notification was accepted.
 type Service struct {
@@ -49,9 +45,9 @@ type Service struct {
 	cfg      Config
 	log      *slog.Logger
 
-	mu      sync.RWMutex // guards closed, and keeps a send on queue from racing its close
-	closed  bool
 	queue   chan *item
+	stop    chan struct{} // closed when Run is told to stop: no new events, drain the queue
+	exited  chan struct{} // closed once the flushers have drained and returned
 	started atomic.Bool
 
 	refused, invalid throttle // log limits for unauthenticated and malformed events
@@ -111,6 +107,8 @@ func New(store ports.WebhookStore, providers map[string]Provider, cfg Config, lo
 		cfg:      cfg,
 		log:      log,
 		queue:    make(chan *item, cfg.QueueSize),
+		stop:     make(chan struct{}),
+		exited:   make(chan struct{}),
 	}, nil
 }
 
@@ -142,21 +140,30 @@ func (s *Service) Receive(ctx context.Context, provider string, body []byte, sig
 	}
 
 	it := &item{event: ev, done: make(chan error, 1)}
-	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
-		return ErrShuttingDown
+	select {
+	case <-s.stop:
+		return ports.ErrShuttingDown
+	default:
 	}
 	select {
 	case s.queue <- it:
-		s.mu.RUnlock()
+	case <-s.stop:
+		return ports.ErrShuttingDown
 	case <-ctx.Done():
-		s.mu.RUnlock()
 		return ctx.Err()
 	}
 	select {
 	case err := <-it.done:
 		return err
+	case <-s.exited:
+		// The flushers are gone. An answer may have landed just before; if not,
+		// the event was queued too late to be saved, and the provider retries.
+		select {
+		case err := <-it.done:
+			return err
+		default:
+			return ports.ErrShuttingDown
+		}
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -165,9 +172,10 @@ func (s *Service) Receive(ctx context.Context, provider string, body []byte, sig
 // Run saves queued events and re-resolves early ones until ctx is done, then
 // refuses new events, saves what is still queued and returns. Call it once.
 //
-// Stop the HTTP server first and cancel ctx after: a request still waiting for
-// queue space holds back the shutdown until it gets a slot or its own context
-// ends.
+// Stopping does not wait for requests: one blocked on a full queue is answered
+// ErrShuttingDown, and one whose event was queued too late to be saved is too,
+// so the provider retries it. Stop the HTTP server first anyway, so requests in
+// flight finish normally.
 func (s *Service) Run(ctx context.Context) error {
 	if !s.started.CompareAndSwap(false, true) {
 		return errors.New("webhook: Run called twice")
@@ -188,11 +196,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	<-ctx.Done()
-	s.mu.Lock()
-	s.closed = true
-	close(s.queue)
-	s.mu.Unlock()
+	close(s.stop)
 	flushers.Wait()
+	close(s.exited)
 	<-resolverDone
 	return nil
 }

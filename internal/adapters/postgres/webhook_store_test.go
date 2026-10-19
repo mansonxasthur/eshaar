@@ -335,6 +335,28 @@ func TestWebhookStore(t *testing.T) {
 		}
 	})
 
+	t.Run("an event older than the lookback window is left alone", func(t *testing.T) {
+		id := seedRow(t, conn, "old1", domain.ChannelSMS, "pending", "", "")
+		record(t, event("p-old1", domain.ChannelSMS, "e1", "m1", "old1", domain.StateDelivered, ""))
+		if _, err := conn.Exec(ctx, `UPDATE webhook_events SET created_at = now() - interval '2 hours' WHERE provider = 'p-old1'`); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.MarkAccepted(ctx, id, "p-old1", "m1"); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 3; i++ {
+			if _, err := s.ResolvePending(ctx, 100); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if r := readRow(t, conn, id); r.state != "accepted" {
+			t.Errorf("state = %s, want the old event ignored", r.state)
+		}
+		if l := eventLink(t, conn, "p-old1", "e1"); l != nil {
+			t.Errorf("old event linked to %s", *l)
+		}
+	})
+
 	t.Run("an empty batch and a bad limit", func(t *testing.T) {
 		if err := s.RecordEvents(ctx, nil); err != nil {
 			t.Error(err)

@@ -111,6 +111,18 @@ func start(t *testing.T, store *fakeStore, cfg Config) *Service {
 	return s
 }
 
+// waitFor polls cond until it holds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func signedBody(id string) []byte {
 	return []byte(fmt.Sprintf(`{"event_id":"%s","message_id":"m-%s","idempotency_key":"k","channel":"sms","status":"delivered"}`, id, id))
 }
@@ -317,7 +329,7 @@ func TestAFullQueueHoldsRequestsBackUntilTheirContextEnds(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() { _ = receive(s, "sms-a", secretA, signedBody(fmt.Sprint("fill", i))) }()
 	}
-	time.Sleep(50 * time.Millisecond)
+	waitFor(t, "a full queue", func() bool { return len(s.queue) == cap(s.queue) })
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	body := signedBody("late")
@@ -355,8 +367,8 @@ func TestShutdownSavesWhatIsQueuedThenRefusesNewEvents(t *testing.T) {
 	if _, events := store.saved(); len(events) != 3 {
 		t.Errorf("saved %d events, want 3", len(events))
 	}
-	if err := receive(s, "sms-a", secretA, signedBody("after")); !errors.Is(err, ErrShuttingDown) {
-		t.Errorf("after shutdown: err = %v, want ErrShuttingDown", err)
+	if err := receive(s, "sms-a", secretA, signedBody("after")); !errors.Is(err, ports.ErrShuttingDown) {
+		t.Errorf("after shutdown: err = %v, want ports.ErrShuttingDown", err)
 	}
 }
 
@@ -496,5 +508,70 @@ func TestThrottleAllowsOneLinePerSecondAndCountsTheRest(t *testing.T) {
 	}
 	if ok, skipped := th.allow(now.Add(2 * time.Second)); !ok || skipped != 0 {
 		t.Errorf("next window = %v, %d skipped", ok, skipped)
+	}
+}
+
+func TestShutdownAnswersRequestsBlockedOnAFullQueue(t *testing.T) {
+	store := &fakeStore{gate: make(chan struct{})}
+	cfg := testConfig()
+	cfg.QueueSize, cfg.BatchSize = 1, 1
+	s, err := New(store, testProviders, cfg, discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- s.Run(ctx) }()
+
+	// One event sits at the gate in the flusher, one fills the queue, and a third blocks.
+	for i := 0; i < 2; i++ {
+		go func() { _ = receive(s, "sms-a", secretA, signedBody(fmt.Sprint("fill", i))) }()
+	}
+	waitFor(t, "a full queue", func() bool { return len(s.queue) == cap(s.queue) })
+	blocked := make(chan error, 1)
+	go func() { blocked <- receive(s, "sms-a", secretA, signedBody("blocked")) }()
+
+	cancel()
+	select {
+	case err := <-blocked:
+		if !errors.Is(err, ports.ErrShuttingDown) {
+			t.Errorf("blocked request: err = %v, want ErrShuttingDown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a blocked request was not released by shutdown")
+	}
+	close(store.gate)
+	if err := <-runDone; err != nil {
+		t.Errorf("Run = %v", err)
+	}
+}
+
+func TestShutdownDrainGivesUpAfterFlushTimeout(t *testing.T) {
+	store := &fakeStore{saveErr: fmt.Errorf("save: %w", context.DeadlineExceeded)}
+	cfg := testConfig()
+	cfg.BatchSize, cfg.FlushInterval, cfg.FlushTimeout, cfg.Flushers = 1, time.Minute, 30*time.Millisecond, 1
+	s, err := New(store, testProviders, cfg, discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Queue events before Run starts, so they are all waiting at shutdown.
+	results := make(chan error, 5)
+	for i := 0; i < 5; i++ {
+		go func() { results <- receive(s, "sms-a", secretA, signedBody(fmt.Sprint("d", i))) }()
+	}
+	waitFor(t, "queued events", func() bool { return len(s.queue) == 5 })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // stop at once
+	began := time.Now()
+	if err := s.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(began); d > 2*time.Second {
+		t.Errorf("shutdown took %v", d)
+	}
+	for i := 0; i < 5; i++ {
+		if err := <-results; err == nil {
+			t.Error("an event reported saved with the database failing")
+		}
 	}
 }

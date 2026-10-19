@@ -51,6 +51,10 @@ var (
 
 	// ErrInvalidEvent means the body is not a well-formed event.
 	ErrInvalidEvent = errors.New("invalid webhook event")
+
+	// ErrShuttingDown means the receiver is stopping and took nothing. The
+	// provider should retry; it is not a failure worth an alarm.
+	ErrShuttingDown = errors.New("webhook receiver is shutting down")
 )
 
 // EventReceiver takes a provider's webhook as received over HTTP.

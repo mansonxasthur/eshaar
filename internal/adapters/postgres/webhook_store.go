@@ -131,6 +131,13 @@ func (s *Store) RecordEvents(ctx context.Context, events []domain.WebhookEvent) 
 	return nil
 }
 
+// resolveWindow is how far back ResolvePending looks. An event that is still
+// unlinked after this long is not going to be (the sender and janitors settle a
+// row within minutes), so it stays stored for inspection and stops costing a
+// lookup on every pass. The index on created_at where notification_id is null
+// serves the range.
+const resolveWindow = "1 hour"
+
 // resolvePending links saved events that have no notification, oldest first,
 // and applies their states. Only events that resolve now count against the
 // limit, so events that cannot resolve yet (a row still pending, or never
@@ -142,7 +149,7 @@ WITH ev AS MATERIALIZED (
     SELECT e.id, e.created_at, e.provider, e.channel, e.provider_message_id AS mid, e.payload,
            e.payload->>'idempotency_key' AS key, e.payload->>'status' AS status, left(e.payload->>'reason', 500) AS reason
     FROM webhook_events e
-    WHERE e.notification_id IS NULL
+    WHERE e.notification_id IS NULL AND e.created_at > now() - interval '` + resolveWindow + `'
 ),
 src AS MATERIALIZED (
     SELECT l.*, row_number() OVER (ORDER BY l.created_at, l.id) AS ord FROM (

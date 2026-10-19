@@ -30,6 +30,14 @@ const (
 	EnvProvidersFile     = "PROVIDERS_CONFIG"
 
 	EnvProviderStatusTimeout = "PROVIDER_STATUS_TIMEOUT"
+
+	EnvWebhookBatchSize       = "WEBHOOK_BATCH_SIZE"
+	EnvWebhookFlushInterval   = "WEBHOOK_FLUSH_INTERVAL"
+	EnvWebhookFlushers        = "WEBHOOK_FLUSHERS"
+	EnvWebhookFlushTimeout    = "WEBHOOK_FLUSH_TIMEOUT"
+	EnvWebhookQueueSize       = "WEBHOOK_QUEUE_SIZE"
+	EnvWebhookResolveInterval = "WEBHOOK_RESOLVE_INTERVAL"
+	EnvWebhookResolveBatch    = "WEBHOOK_RESOLVE_BATCH"
 )
 
 // Need selects the settings a process requires. Settings a process does not
@@ -44,6 +52,7 @@ const (
 	NeedHTTP
 	NeedAPIKeys // API keys and the per-key rate limit
 	NeedSender  // consumer group, send pool and outbound rate limit
+	NeedWebhook // webhook batching and the providers file (for the secrets)
 )
 
 // Config holds the settings shared by the Eshaar processes.
@@ -64,6 +73,14 @@ type Config struct {
 
 	ProvidersFile         string        // YAML file listing each channel's providers and their policies
 	ProviderStatusTimeout time.Duration // limit for the status check after a provider times out
+
+	WebhookBatchSize       int           // events saved by one statement
+	WebhookFlushInterval   time.Duration // longest an event waits for its batch to fill
+	WebhookFlushers        int           // batches saved concurrently
+	WebhookFlushTimeout    time.Duration // limit for saving one batch
+	WebhookQueueSize       int           // events waiting for a flusher; defaults to two batches per flusher
+	WebhookResolveInterval time.Duration // how often events that beat their accept are re-resolved
+	WebhookResolveBatch    int           // events linked per resolver pass
 }
 
 // Load reads the configuration through getenv (os.Getenv in production) and
@@ -114,7 +131,38 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 				errs = append(errs, err)
 			}
 		}
+	}
+	if need&(NeedSender|NeedWebhook) != 0 {
 		cfg.ProvidersFile = valueOr(getenv(EnvProvidersFile), "infra/providers.yaml")
+	}
+	if need&NeedWebhook != 0 {
+		var err error
+		if cfg.WebhookBatchSize, err = positiveInt(getenv, EnvWebhookBatchSize, "200"); err != nil {
+			errs = append(errs, err)
+		}
+		if cfg.WebhookFlushers, err = positiveInt(getenv, EnvWebhookFlushers, "4"); err != nil {
+			errs = append(errs, err)
+		}
+		if cfg.WebhookResolveBatch, err = positiveInt(getenv, EnvWebhookResolveBatch, "200"); err != nil {
+			errs = append(errs, err)
+		}
+		queueDefault := strconv.Itoa(max(1, 2*cfg.WebhookBatchSize*cfg.WebhookFlushers))
+		if cfg.WebhookQueueSize, err = positiveInt(getenv, EnvWebhookQueueSize, queueDefault); err != nil {
+			errs = append(errs, err)
+		}
+		for _, d := range []struct {
+			dst  *time.Duration
+			name string
+			def  string
+		}{
+			{&cfg.WebhookFlushInterval, EnvWebhookFlushInterval, "20ms"},
+			{&cfg.WebhookFlushTimeout, EnvWebhookFlushTimeout, "5s"},
+			{&cfg.WebhookResolveInterval, EnvWebhookResolveInterval, "1s"},
+		} {
+			if *d.dst, err = positiveDuration(getenv, d.name, d.def); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
 	if need&NeedDatabase != 0 {
 		errs = append(errs, checkDatabaseURL(cfg.DatabaseURL))
