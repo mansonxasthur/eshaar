@@ -215,15 +215,15 @@ These topics are deliberately deferred and will be covered in the solution docum
 
 | Index | Serves |
 | --- | --- |
-| `notifications (COALESCE(claimed_at, created_at)) WHERE state = 'pending' AND attempts < 3` | Recovery janitor claim query |
-| `notifications (claimed_at) WHERE state = 'pending' AND attempts >= 3` | Sweeper query |
+| `notifications (COALESCE(claimed_at, created_at)) WHERE state = 'pending' AND attempts < 3` (Phase 6, migration 0005) | Recovery janitor claim query |
+| `notifications (claimed_at) WHERE state = 'pending' AND attempts >= 3` (Phase 6, migration 0005) | Sweeper query |
 | `notifications (provider, provider_message_id) WHERE provider_message_id IS NOT NULL` unique | Webhook lookup by provider message id |
 | `notifications (idempotency_key, channel)` unique | Webhook lookup by key and channel, plus dedup |
 | `webhook_events (provider, provider_message_id)` | Matching events to a notification once it is accepted |
 | `webhook_events (notification_id) WHERE notification_id IS NOT NULL` | Events of one notification, FK checks |
 | `webhook_events (created_at) WHERE notification_id IS NULL` | Re-resolving events that arrived before the accept |
 
-The janitor and sweeper indexes are partial, so they only hold the rows still waiting, not the whole table. They are split by `attempts`: rows with attempts left go to the recovery index, exhausted rows to the sweeper. The recovery index is on `COALESCE(claimed_at, created_at)`, the time a row last had a chance to finish, so one index serves both halves of the claim condition and the query must use the same expression. The Phase 6 migration (0004; migration 0003 added `last_provider`) adds `attempts`, creates these two indexes and drops the two that migration 0001 created.
+The janitor and sweeper indexes are partial, so they only hold the rows still waiting, not the whole table. They are split by `attempts`: rows with attempts left go to the recovery index, exhausted rows to the sweeper. The recovery index is on `COALESCE(claimed_at, created_at)`, the time a row last had a chance to finish, so one index serves both halves of the claim condition and the query must use the same expression. The two indexes migration 0001 created for the first janitor design matched none of these rules, and every insert and state change of a pending row still paid to maintain them, so migration 0004 dropped them. Until the Phase 6 migration (0005, which adds `attempts` and creates the two indexes above) the table has no janitor indexes, and no janitor query exists yet. The Phase 6 tests include an `EXPLAIN` check that the claim and sweep queries use these indexes (an index scan, not a sequential scan, on a table large enough for the planner to prefer it), so a changed condition cannot silently lose its index.
 
 ## Local environment
 

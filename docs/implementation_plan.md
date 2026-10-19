@@ -94,7 +94,7 @@ The goal is an endpoint that validates provider events and records the final del
 
 The goal is two background jobs that recover stalled rows and mark the ones that never complete as `unresolved`.
 
-- Add an `attempts` column (migration 0004; 0003 added `last_provider` in Phase 4) that counts janitor attempts, and replace the two partial indexes of migration 0001 with `(COALESCE(claimed_at, created_at)) WHERE state = 'pending' AND attempts < 3` and `(claimed_at) WHERE state = 'pending' AND attempts >= 3`.
+- Add an `attempts` column (migration 0005; Phase 4 added `last_provider` in 0003 and dropped the stale janitor indexes in 0004) that counts janitor attempts, and create the two partial indexes `(COALESCE(claimed_at, created_at)) WHERE state = 'pending' AND attempts < 3` and `(claimed_at) WHERE state = 'pending' AND attempts >= 3`.
 - **Recovery janitor, every 5 seconds:** atomically claim a batch of `pending` rows with `attempts < 3` where `claimed_at` is null and `created_at` is older than 10 seconds, or `claimed_at` is older than 10 seconds. Set `claimed_at` and increment `attempts` in the same statement.
 - **Re-drive, resuming from `last_provider`:** start the channel's chain at the last provider the sender called (the first provider if empty or no longer in the chain). If that provider supports a status check, ask whether it already took the idempotency key and accept with its message id if so. Otherwise send through it and fail over to the later providers, and write the outcome guarded by `state = pending`.
 - **Sweeper, every 10 minutes:** mark `pending` rows with `attempts >= 3` and `claimed_at` older than 10 seconds as `unresolved`, with a `failure_reason`.
@@ -102,7 +102,7 @@ The goal is two background jobs that recover stalled rows and mark the ones that
 - Reuse the sender's delivery code: extract it into an exported `sender.Deliverer` that `cmd/janitor` wires into `internal/janitor`, and move the providers-file wiring from `cmd/sender` to a package under `cmd/internal` that both commands use. A Kafka re-publish would not work, because the sender does not send rows that already exist.
 - Settings: attempt limit (3), stale age (10 seconds), janitor tick (5 seconds), sweeper tick (10 minutes), batch size and re-drive concurrency.
 
-**Tests:** unit tests for both selection rules including the `attempts` limit and the 10-second age on the null case, the sweeper touching only exhausted rows and setting a reason, a re-drive that resumes from `last_provider`, one that is accepted by the status check without a send, an end-to-end test that simulates a sender crash after the acknowledgement and verifies recovery, and a concurrency test with two janitors competing for the same rows.
+**Tests:** an `EXPLAIN` test that the claim and sweep queries use their partial indexes (on a table seeded with enough rows for the planner to choose an index scan), unit tests for both selection rules including the `attempts` limit and the 10-second age on the null case, the sweeper touching only exhausted rows and setting a reason, a re-drive that resumes from `last_provider`, one that is accepted by the status check without a send, an end-to-end test that simulates a sender crash after the acknowledgement and verifies recovery, and a concurrency test with two janitors competing for the same rows.
 
 ## Phase 7: Load test, API docs and solution document
 
