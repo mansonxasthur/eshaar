@@ -84,10 +84,11 @@ type fakeStore struct {
 	insertErrs []error                        // returned by successive InsertPending calls
 	accepted   map[string][2]string           // id -> provider, message id
 	failed     map[string]string              // id -> reason
+	unresolved map[string]string              // id -> reason
 }
 
 func newStore(rec *recorder) *fakeStore {
-	return &fakeStore{rec: rec, rows: map[string]domain.Notification{}, accepted: map[string][2]string{}, failed: map[string]string{}}
+	return &fakeStore{rec: rec, rows: map[string]domain.Notification{}, accepted: map[string][2]string{}, failed: map[string]string{}, unresolved: map[string]string{}}
 }
 
 func (s *fakeStore) InsertPending(_ context.Context, rows []domain.Notification) ([]domain.Notification, error) {
@@ -125,6 +126,13 @@ func (s *fakeStore) MarkFailed(_ context.Context, id, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failed[id] = reason
+	return nil
+}
+
+func (s *fakeStore) MarkUnresolved(_ context.Context, id, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unresolved[id] = reason
 	return nil
 }
 
