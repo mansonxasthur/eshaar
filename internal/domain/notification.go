@@ -19,6 +19,7 @@ type Notification struct {
 	Phone             *string         // set on SMS and WhatsApp rows
 	State             State
 	FailureReason     *string
+	Provider          *string // provider that accepted the send
 	ProviderMessageID *string
 	AcceptedAt        *time.Time
 	ClaimedAt         *time.Time // set when the recovery janitor claims the row

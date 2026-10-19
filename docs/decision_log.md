@@ -196,3 +196,26 @@ These topics are deliberately deferred and will be covered in the solution docum
 - Settings come from environment variables only (`DATABASE_URL`, `KAFKA_BROKERS`, `KAFKA_TOPIC`, `HTTP_ADDR`, `LOG_LEVEL`), which suits docker-compose and keeps secrets out of files.
 - One `Config` type is shared, but each process names what it needs (`NeedDatabase`, `NeedKafka`, `NeedHTTP`). Unneeded settings are neither required nor validated, so the janitor starts without Kafka and the dispatcher without Postgres.
 - `KAFKA_TOPIC` defaults to `notifications` and `HTTP_ADDR` to `:8080`. The database URL and brokers have no default, so a missing one fails at startup with every problem listed.
+
+## Schema and migrations
+
+- Migrations are plain up/down SQL files embedded in `internal/adapters/postgres` and applied with golang-migrate (`MigrateUp`), so any process or test can bring a database up to date.
+- The migration test starts a real Postgres with testcontainers-go and skips under `-short` or without Docker. It checks both unique constraints, that the same value under another channel or provider is accepted, the CHECK constraints, and a down-then-up round trip.
+- `notifications` also has CHECKs on `channel`, `state`, and on contact fields (email rows need an address and no phone, SMS and WhatsApp rows the reverse), so a malformed row fails at insert.
+- `notifications` gains a nullable `provider` column, set when a provider accepts. Message ids are only unique per provider, so webhook lookup is by `(provider, provider_message_id)`, backed by a unique partial index. An `accepted` row must have `provider`, `provider_message_id` and `accepted_at`.
+- `updated_at` has no trigger; every UPDATE sets it. A per-attempt history table is not part of Phase 1: the log's "every attempt is written to `notifications`" stands until the sender phase shows it is too thin.
+- `webhook_events.event_id` stays nullable. Postgres treats NULLs as distinct, so events without an id are never deduplicated by the unique constraint.
+
+### Indexes
+
+| Index | Serves |
+| --- | --- |
+| `notifications (created_at) WHERE state = 'pending' AND claimed_at IS NULL` | Recovery janitor claim query |
+| `notifications (claimed_at) WHERE state = 'pending' AND claimed_at IS NOT NULL` | Sweeper query |
+| `notifications (provider, provider_message_id) WHERE provider_message_id IS NOT NULL` unique | Webhook lookup by provider message id |
+| `notifications (idempotency_key, channel)` unique | Webhook lookup by key and channel, plus dedup |
+| `webhook_events (provider, provider_message_id)` | Matching events to a notification once it is accepted |
+| `webhook_events (notification_id) WHERE notification_id IS NOT NULL` | Events of one notification, FK checks |
+| `webhook_events (created_at) WHERE notification_id IS NULL` | Re-resolving events that arrived before the accept |
+
+The janitor and sweeper indexes are partial, so they only hold the rows still waiting, not the whole table. They are split by `claimed_at` because each query filters on one side of it.
