@@ -29,6 +29,8 @@ The goal is a runnable skeleton with Kafka, the database and the schema in place
 
 **Tests:** unit tests for the state machine, and a migration test that checks both unique constraints reject duplicates.
 
+**Status: done.** Run it with `make up && make migrate`; `make test` runs the state machine and migration tests (the latter needs Docker). Decisions are in the decision log under Configuration, Schema and migrations, and Local environment.
+
 ## Phase 2: Dispatcher
 
 The goal is an HTTP endpoint that validates a request, publishes it to Kafka, and answers `202 Accepted` as soon as Kafka confirms.
