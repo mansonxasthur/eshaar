@@ -40,8 +40,9 @@ Hexagonal. Import direction is enforced by convention, so check it in review:
 - `internal/ports`: interfaces for publishing, consuming, storing notifications and sending through a provider. Imports only the domain.
 - `internal/sender`: the sender service (batch loop, bounded pool, per-provider rate limiter and circuit breaker, provider fallback chain). Imports only the domain and ports.
 - `internal/webhook`: webhook service (signature check, event parsing, batching, resolving). Imports only the domain and ports.
+- `internal/janitor`: recovery and sweeper loops. Depends on `ports.JanitorStore` and a `Redriver` interface (`*sender.Deliverer` satisfies it); imports only the domain and ports.
 - `internal/adapters`: Kafka, Postgres, mock provider, HTTP. Import ports and the domain, never each other.
-- `cmd/{dispatcher,sender,webhook,janitor}`: the only places that wire adapters to ports. Each is a separate process.
+- `cmd/{dispatcher,sender,webhook,janitor}`: the only places that wire adapters to ports. Each is a separate process. `cmd/internal/wiring` holds wiring shared by more than one of them (the providers file); only `cmd/*` imports it.
 - `cmd/migrate`: one-shot tool (`make migrate`) that applies the Postgres migrations and exits; it is not part of the runtime flow.
 - `internal/platform`: cross-cutting helpers (logging, later config).
 

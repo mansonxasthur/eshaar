@@ -80,8 +80,10 @@ type outcome struct {
 //     failed.
 //
 // The flow starts at chain[first], so a re-drive can resume where the sender
-// stopped, and wraps around to the providers before it; attempt numbers in the
-// log are positions in the whole chain. The whole flow runs under SendTimeout; each provider call also has its own
+// stopped, and wraps around to the providers before it. Attempt numbers in the
+// log are positions in the whole chain.
+//
+// The whole flow runs under SendTimeout; each provider call also has its own
 // timeout from its route.
 func (d *Deliverer) deliver(ctx context.Context, log *slog.Logger, n domain.Notification, chain []Route, first int) outcome {
 	if len(chain) == 0 {

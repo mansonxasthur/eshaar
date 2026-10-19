@@ -106,6 +106,8 @@ The goal is two background jobs that recover stalled rows and mark the ones that
 
 **Tests:** an `EXPLAIN` test that the claim and sweep queries use their partial indexes (on a table seeded with enough rows for the planner to choose an index scan), unit tests for both selection rules including the `attempts` limit and the 10-second age on the null case, the sweeper touching only exhausted rows and setting a reason, a re-drive that resumes from `last_provider`, one that is accepted by the status check without a send, an end-to-end test that simulates a sender crash after the acknowledgement and verifies recovery, and a concurrency test with two janitors competing for the same rows.
 
+**Status: done.** Run it with `make up && make migrate`, then `bin/janitor` (several instances are safe). It shares `PROVIDERS_CONFIG` and the chain timeouts with the sender. Decisions are in the decision log under Janitors; the attempt limit is a constant, not a setting, and `Deliverer.Resume` wraps around to the providers before `last_provider`.
+
 ## Phase 7: Load test, API docs and solution document
 
 The goal is to prove the behavior under load and package everything for review.
