@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -117,6 +118,41 @@ func (r Request) Validate() error {
 		return &ValidationError{Fields: fields}
 	}
 	return nil
+}
+
+// Notifications splits the request into one pending Notification per channel in
+// Content, in channel name order. Each row keeps only its own channel's block
+// and the contact field that channel uses. It assumes the request is valid.
+func (r Request) Notifications(now time.Time) []Notification {
+	names := make([]string, 0, len(r.Content))
+	for c := range r.Content {
+		names = append(names, string(c))
+	}
+	sort.Strings(names)
+
+	out := make([]Notification, 0, len(names))
+	for _, name := range names {
+		ch := Channel(name)
+		n := Notification{
+			IdempotencyKey:   r.IdempotencyKey,
+			RecipientID:      r.RecipientID,
+			NotificationType: r.NotificationType,
+			Channel:          ch,
+			Content:          r.Content[ch],
+			State:            StatePending,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		if ch == ChannelEmail {
+			email := r.Email
+			n.Email = &email
+		} else {
+			phone := r.Phone
+			n.Phone = &phone
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // storableText reports whether s can be stored in a Postgres text column: valid
