@@ -14,19 +14,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Providers lists, per channel, the providers to try in order: the first is
-// the primary and each later one is a fallback for the one before it. Every
+// Providers lists, per channel, the providers to try in order of priority: the
+// lowest number is the primary and each higher one is a fallback for the one
+// before it. ParseProviders returns each channel's list sorted that way. Every
 // channel and provider has its own policy, so this is a channels by providers
 // table, not one shared setting.
 type Providers map[string][]Provider
 
 // Provider is one provider on one channel and the policy that applies to it.
 type Provider struct {
-	Name    string        `yaml:"name"`    // identifies the provider in logs and in the notification row
-	Kind    string        `yaml:"kind"`    // which adapter to use; empty means mock
-	RPS     float64       `yaml:"rps"`     // outbound calls per second to this provider on this channel
-	Timeout time.Duration `yaml:"timeout"` // limit for one call to it
-	Breaker Breaker       `yaml:"breaker"`
+	Name     string        `yaml:"name"`     // identifies the provider in logs and in the notification row
+	Priority int           `yaml:"priority"` // position in the fallback chain: 1 is tried first, then 2, and so on
+	Kind     string        `yaml:"kind"`     // which adapter to use; empty means mock
+	RPS      float64       `yaml:"rps"`      // outbound calls per second to this provider on this channel
+	Timeout  time.Duration `yaml:"timeout"`  // limit for one call to it
+	Breaker  Breaker       `yaml:"breaker"`
 }
 
 // Breaker is the circuit breaker policy of one provider.
@@ -101,6 +103,9 @@ func ParseProviders(data []byte, getenv func(string) string) (Providers, error) 
 	if err := p.validate(); err != nil {
 		return nil, err
 	}
+	for _, list := range p {
+		sort.SliceStable(list, func(i, j int) bool { return list[i].Priority < list[j].Priority })
+	}
 	return p, nil
 }
 
@@ -121,6 +126,7 @@ func (p Providers) validate() error {
 			errs = append(errs, fmt.Errorf("%s: at least one provider is required", c))
 		}
 		seen := map[string]bool{}
+		priorities := map[int]string{}
 		for i, pr := range list {
 			at := fmt.Sprintf("%s[%d]", c, i)
 			switch {
@@ -131,6 +137,13 @@ func (p Providers) validate() error {
 			}
 			if pr.Name != "" {
 				seen[pr.Name] = true
+			}
+			if pr.Priority < 1 {
+				errs = append(errs, fmt.Errorf("%s: provider %q: priority must be at least 1, got %d", at, pr.Name, pr.Priority))
+			} else if other, dup := priorities[pr.Priority]; dup {
+				errs = append(errs, fmt.Errorf("%s: provider %q: priority %d is already used by %q", at, pr.Name, pr.Priority, other))
+			} else {
+				priorities[pr.Priority] = pr.Name
 			}
 			if pr.RPS <= 0 || math.IsNaN(pr.RPS) || math.IsInf(pr.RPS, 0) {
 				errs = append(errs, fmt.Errorf("%s: rps must be a positive number", at))

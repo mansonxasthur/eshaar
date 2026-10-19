@@ -10,15 +10,15 @@ import (
 	"github.com/mansonxasthur/eshaar/internal/ports"
 )
 
-func spec(name string) config.Provider {
-	return config.Provider{Name: name, RPS: 10, Timeout: 2 * time.Second, Breaker: config.Breaker{Failures: 3, OpenFor: time.Minute}}
+func spec(name string, priority int) config.Provider {
+	return config.Provider{Name: name, Priority: priority, RPS: 10, Timeout: 2 * time.Second, Breaker: config.Breaker{Failures: 3, OpenFor: time.Minute}}
 }
 
 func allChannels(t *testing.T, mutate func(config.Providers)) config.Providers {
 	t.Helper()
 	specs := config.Providers{}
 	for _, c := range domain.Channels() {
-		specs[string(c)] = []config.Provider{spec(string(c) + "-a"), spec(string(c) + "-b")}
+		specs[string(c)] = []config.Provider{spec(string(c)+"-a", 1), spec(string(c)+"-b", 2)}
 	}
 	if mutate != nil {
 		mutate(specs)
@@ -28,7 +28,7 @@ func allChannels(t *testing.T, mutate func(config.Providers)) config.Providers {
 
 func TestBuildRoutesKeepsOrderTimeoutsAndSeparateInstances(t *testing.T) {
 	specs := allChannels(t, func(s config.Providers) {
-		s["sms"] = append(s["sms"], config.Provider{Name: "sms-c", Kind: "mock", RPS: 1, Timeout: 300 * time.Millisecond, Breaker: config.Breaker{Failures: 1, OpenFor: time.Second}})
+		s["sms"] = append(s["sms"], config.Provider{Name: "sms-c", Priority: 3, Kind: "mock", RPS: 1, Timeout: 300 * time.Millisecond, Breaker: config.Breaker{Failures: 1, OpenFor: time.Second}})
 	})
 	routes, err := buildRoutes(specs)
 	if err != nil {
@@ -51,8 +51,8 @@ func TestBuildRoutesKeepsOrderTimeoutsAndSeparateInstances(t *testing.T) {
 func TestBuildRoutesReportsEveryProblem(t *testing.T) {
 	specs := allChannels(t, func(s config.Providers) {
 		delete(s, "whatsapp")
-		s["pigeon"] = []config.Provider{spec("p")}
-		bad := spec("x")
+		s["pigeon"] = []config.Provider{spec("p", 1)}
+		bad := spec("x", 1)
 		bad.Kind = "twilio"
 		s["email"] = []config.Provider{bad}
 	})
@@ -75,5 +75,22 @@ func TestShippedProvidersFileLoads(t *testing.T) {
 	}
 	if _, err := buildRoutes(specs); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBuildRoutesOrdersByPriority(t *testing.T) {
+	specs := allChannels(t, func(s config.Providers) {
+		s["sms"] = []config.Provider{spec("third", 30), spec("first", 1), spec("second", 2)}
+	})
+	routes, err := buildRoutes(specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range routes[domain.ChannelSMS] {
+		got = append(got, r.Provider.Name())
+	}
+	if strings.Join(got, ",") != "first,second,third" {
+		t.Errorf("chain = %v, want priority order", got)
 	}
 }

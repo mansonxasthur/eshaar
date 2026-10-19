@@ -46,6 +46,14 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Log the effective order, since priorities can come from the environment.
+	for _, c := range domain.Channels() {
+		var names []string
+		for _, r := range routes[c] {
+			names = append(names, r.Provider.Name())
+		}
+		log.Info("provider chain", "channel", c, "providers", names)
+	}
 	return serve(ctx, cfg, log, routes)
 }
 

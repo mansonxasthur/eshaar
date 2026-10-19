@@ -16,7 +16,7 @@ Issue: [#9 Phase 4: Providers and fallback](https://github.com/mansonxasthur/esh
 | 2 | Mock provider: rate limit, scripted steps, status check, late failure |
 | 3 | Circuit breaker decorator; the decorators keep the status check |
 | 4 | Fallback flow, per-provider timeouts, config and wiring (first as an A/B pair) |
-| 5 | Provider chain per channel from `infra/providers.yaml` |
+| 5 | Provider chain per channel from `infra/providers.yaml`, ordered by a `priority` field |
 | 6 | End-to-end fallback test, decision log, this log; `Closes #9` |
 
 ## Review findings acted on

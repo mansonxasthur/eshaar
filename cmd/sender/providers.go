@@ -31,7 +31,10 @@ func buildRoutes(specs config.Providers) (map[domain.Channel][]sender.Route, err
 			errs = append(errs, fmt.Errorf("providers: %w", err))
 			continue
 		}
-		for _, spec := range specs[name] {
+		// Priority decides the order, whatever order the specs arrive in.
+		chain := append([]config.Provider(nil), specs[name]...)
+		sort.SliceStable(chain, func(i, j int) bool { return chain[i].Priority < chain[j].Priority })
+		for _, spec := range chain {
 			p, err := newProvider(spec)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("providers: %s: %w", name, err))

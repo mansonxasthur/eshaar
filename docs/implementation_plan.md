@@ -65,7 +65,7 @@ The goal is a Kafka consumer group where each consumer saves a notification befo
 The goal is a mock provider and the fallback logic from provider A to provider B, with a circuit breaker around each provider.
 
 - Build a mock provider that can succeed, fail, delay, return a rate-limit response, and accept a message then send a failure webhook later.
-- Give each channel an ordered chain of providers (A, B, maybe C), each with its own rate limit, call timeout and circuit breaker, configured in `infra/providers.yaml` with values from the environment.
+- Give each channel a chain of providers (A, B, maybe C) ordered by a `priority` number (1 first, unique per channel), each with its own rate limit, call timeout and circuit breaker, configured in `infra/providers.yaml` with values from the environment.
 - Run each channel send as: provider A first, and on a failure switch to the next provider immediately.
 - On a timeout, make one final status check against that provider with the idempotency key if it supports it, then switch to the next. If it cannot check, switch anyway.
 - On a rate-limit response, switch to the next provider without retrying.
