@@ -24,15 +24,11 @@ type Config struct {
 	MaxBackoff    time.Duration // cap on that wait
 }
 
-// recordTimeout bounds an outcome write, which must not share the send's
-// deadline: a send that used its whole timeout still has to be recorded.
-const recordTimeout = 5 * time.Second
-
 // Sender consumes batches, saves them, acknowledges, then sends.
 type Sender struct {
 	consumer  ports.Consumer
 	store     ports.NotificationStore
-	providers map[domain.Channel][]Route
+	deliverer *Deliverer
 	cfg       Config
 	log       *slog.Logger
 	now       func() time.Time
@@ -47,32 +43,17 @@ func New(consumer ports.Consumer, store ports.NotificationStore, providers map[d
 	if cfg.PoolSize < 1 {
 		return nil, errors.New("sender: pool size must be at least 1")
 	}
-	if cfg.SendTimeout <= 0 || cfg.StatusTimeout <= 0 {
-		return nil, errors.New("sender: send and status timeouts must be positive")
-	}
 	if cfg.MinBackoff <= 0 || cfg.MaxBackoff < cfg.MinBackoff {
 		return nil, errors.New("sender: backoff needs 0 < min <= max")
 	}
-	for c, chain := range providers {
-		var calls time.Duration
-		for i, r := range chain {
-			if r.Provider == nil || r.Timeout <= 0 {
-				return nil, fmt.Errorf("sender: channel %s provider %d needs a provider and a positive timeout", c, i+1)
-			}
-			calls += r.Timeout
-		}
-		if len(chain) > 1 {
-			calls += time.Duration(len(chain)-1) * cfg.StatusTimeout
-		}
-		if cfg.SendTimeout < calls {
-			log.Warn("send timeout is shorter than every provider call plus status checks; a slow provider can leave the next no time",
-				"channel", c, "send_timeout", cfg.SendTimeout, "needed", calls)
-		}
+	d, err := NewDeliverer(store, providers, DelivererConfig{SendTimeout: cfg.SendTimeout, StatusTimeout: cfg.StatusTimeout}, log)
+	if err != nil {
+		return nil, err
 	}
 	return &Sender{
 		consumer:  consumer,
 		store:     store,
-		providers: providers,
+		deliverer: d,
 		cfg:       cfg,
 		log:       log,
 		now:       time.Now,
@@ -153,63 +134,8 @@ func (s *Sender) dispatch(ctx context.Context, rows []domain.Notification) {
 					s.log.ErrorContext(ctx, "send panicked; row stays pending", "notification_id", n.ID, "channel", n.Channel, "panic", fmt.Sprint(r))
 				}
 			}()
-			s.send(ctx, n)
+			s.deliverer.Send(ctx, n)
 		}()
-	}
-}
-
-// send runs the fallback flow and records its outcome. It does not stop when
-// ctx is cancelled, so a shutdown does not leave a sent notification unrecorded.
-func (s *Sender) send(ctx context.Context, n domain.Notification) {
-	base := context.WithoutCancel(ctx)
-	log := s.log.With("notification_id", n.ID, "idempotency_key", n.IdempotencyKey, "channel", n.Channel)
-
-	out := s.deliver(base, log, n, s.providers[n.Channel])
-	var write func(context.Context) error
-	switch out.state {
-	case domain.StateAccepted:
-		write = func(ctx context.Context) error { return s.store.MarkAccepted(ctx, n.ID, out.provider, out.messageID) }
-	case domain.StateUnresolved:
-		write = func(ctx context.Context) error { return s.store.MarkUnresolved(ctx, n.ID, failureReason(out.reason)) }
-	case domain.StateFailed:
-		write = func(ctx context.Context) error { return s.store.MarkFailed(ctx, n.ID, failureReason(out.reason)) }
-	default:
-		// Pending: some provider was never tried, so there is no outcome and the
-		// row stays pending for the janitor, which resumes from the last provider
-		// called. Any other state is a bug and is treated the same way, never as
-		// a failure.
-		log.WarnContext(ctx, "no outcome to record; row stays pending for the janitor",
-			"state", out.state, "last_provider", out.lastTried, "reason", out.reason)
-		if out.lastTried != "" {
-			s.record(base, log, func(ctx context.Context) error {
-				return s.store.RecordLastProvider(ctx, n.ID, out.lastTried)
-			})
-		}
-		return
-	}
-	s.record(base, log, write)
-}
-
-// maxReasonLen caps the stored failure reason.
-const maxReasonLen = 500
-
-// failureReason is the text stored in failure_reason. Providers must keep
-// contact details out of their errors; the cap bounds what a verbose one adds.
-func failureReason(text string) string {
-	r := []rune(text)
-	if len(r) > maxReasonLen {
-		r = r[:maxReasonLen]
-	}
-	return string(r)
-}
-
-// record runs a store write. A failure is logged and the row stays pending for
-// the janitor to re-drive.
-func (s *Sender) record(base context.Context, log *slog.Logger, write func(context.Context) error) {
-	ctx, cancel := context.WithTimeout(base, recordTimeout)
-	defer cancel()
-	if err := write(ctx); err != nil {
-		log.ErrorContext(ctx, "record outcome; row stays pending", "error", err)
 	}
 }
 

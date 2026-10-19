@@ -1,4 +1,4 @@
-package main
+package wiring
 
 import (
 	"strings"
@@ -30,7 +30,7 @@ func TestBuildRoutesKeepsOrderTimeoutsAndSeparateInstances(t *testing.T) {
 	specs := allChannels(t, func(s config.Providers) {
 		s["sms"] = append(s["sms"], config.Provider{Name: "sms-c", Priority: 3, Kind: "mock", RPS: 1, Timeout: 300 * time.Millisecond, Breaker: config.Breaker{Failures: 1, OpenFor: time.Second}})
 	})
-	routes, err := buildRoutes(specs)
+	routes, err := BuildRoutes(specs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestBuildRoutesReportsEveryProblem(t *testing.T) {
 		bad.Kind = "twilio"
 		s["email"] = []config.Provider{bad}
 	})
-	_, err := buildRoutes(specs)
+	_, err := BuildRoutes(specs)
 	if err == nil {
 		t.Fatal("bad providers accepted")
 	}
@@ -69,11 +69,11 @@ func TestBuildRoutesReportsEveryProblem(t *testing.T) {
 
 // The file shipped in infra must load and build with no environment set.
 func TestShippedProvidersFileLoads(t *testing.T) {
-	specs, err := config.LoadProviders("../../infra/providers.yaml", func(string) string { return "" })
+	specs, err := config.LoadProviders("../../../infra/providers.yaml", func(string) string { return "" })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildRoutes(specs); err != nil {
+	if _, err := BuildRoutes(specs); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -82,7 +82,7 @@ func TestBuildRoutesOrdersByPriority(t *testing.T) {
 	specs := allChannels(t, func(s config.Providers) {
 		s["sms"] = []config.Provider{spec("third", 30), spec("first", 1), spec("second", 2)}
 	})
-	routes, err := buildRoutes(specs)
+	routes, err := BuildRoutes(specs)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,6 @@
-package main
+// Package wiring builds what more than one command needs from the
+// configuration, so the sender and the janitor run the same provider chains.
+package wiring
 
 import (
 	"errors"
@@ -12,11 +14,11 @@ import (
 	"github.com/mansonxasthur/eshaar/internal/sender"
 )
 
-// buildRoutes turns the providers file into a fallback chain per channel. Every
+// BuildRoutes turns the providers file into a fallback chain per channel. Every
 // channel and provider gets its own adapter, circuit breaker and rate limiter,
 // so one provider's outage or throttling on one channel does not touch another.
 // Every supported channel must be configured.
-func buildRoutes(specs config.Providers) (map[domain.Channel][]sender.Route, error) {
+func BuildRoutes(specs config.Providers) (map[domain.Channel][]sender.Route, error) {
 	var errs []error
 	names := make([]string, 0, len(specs))
 	for name := range specs {

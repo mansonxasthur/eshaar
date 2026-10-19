@@ -230,3 +230,43 @@ func TestLoadWebhookSettingsAreOnlyCheckedWhenNeeded(t *testing.T) {
 		t.Errorf("unneeded webhook setting was validated: %v", err)
 	}
 }
+
+func TestLoadJanitorDefaults(t *testing.T) {
+	cfg, err := Load(env(map[string]string{EnvDatabaseURL: "postgres://localhost/eshaar"}), NeedDatabase|NeedJanitor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JanitorInterval != 5*time.Second || cfg.JanitorStaleAfter != 10*time.Second || cfg.SweeperInterval != 10*time.Minute {
+		t.Errorf("timing defaults = %v %v %v", cfg.JanitorInterval, cfg.JanitorStaleAfter, cfg.SweeperInterval)
+	}
+	if cfg.JanitorBatchSize != 50 || cfg.JanitorConcurrency != 50 {
+		t.Errorf("batch %d concurrency %d, want 50 and 50", cfg.JanitorBatchSize, cfg.JanitorConcurrency)
+	}
+	// The janitor shares the sender's chain deadline and status timeout, and
+	// needs the providers file, but not Kafka or the sender's pool.
+	if cfg.SenderSendTimeout != 4500*time.Millisecond || cfg.ProviderStatusTimeout != 500*time.Millisecond || cfg.ProvidersFile != "infra/providers.yaml" {
+		t.Errorf("shared defaults = %v %v %q", cfg.SenderSendTimeout, cfg.ProviderStatusTimeout, cfg.ProvidersFile)
+	}
+	if cfg.SenderPoolSize != 0 || cfg.KafkaGroupID != "" {
+		t.Errorf("sender-only settings were loaded: %+v", cfg)
+	}
+}
+
+func TestLoadJanitorRejectsBadSettings(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		EnvDatabaseURL:        "postgres://localhost/eshaar",
+		EnvJanitorInterval:    "0s",
+		EnvJanitorStaleAfter:  "soon",
+		EnvJanitorBatchSize:   "0",
+		EnvJanitorConcurrency: "x",
+		EnvSweeperInterval:    "-1m",
+	}), NeedDatabase|NeedJanitor)
+	if err == nil {
+		t.Fatal("accepted invalid janitor settings")
+	}
+	for _, name := range []string{EnvJanitorInterval, EnvJanitorStaleAfter, EnvJanitorBatchSize, EnvJanitorConcurrency, EnvSweeperInterval} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error does not mention %s: %v", name, err)
+		}
+	}
+}

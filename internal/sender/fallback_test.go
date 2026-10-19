@@ -71,9 +71,9 @@ func chain(providers ...ports.Provider) []Route {
 }
 
 func deliver(cfg Config, chain []Route) outcome {
-	s := &Sender{cfg: cfg}
+	d := &Deliverer{cfg: DelivererConfig{SendTimeout: cfg.SendTimeout, StatusTimeout: cfg.StatusTimeout}}
 	n := domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS}
-	return s.deliver(context.Background(), slog.New(slog.DiscardHandler), n, chain)
+	return d.deliver(context.Background(), slog.New(slog.DiscardHandler), n, chain, 0)
 }
 
 func TestFallbackSwitchesToBOnFailure(t *testing.T) {

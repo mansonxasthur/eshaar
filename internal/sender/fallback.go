@@ -79,9 +79,13 @@ type outcome struct {
 //   - Nothing accepted and every provider was tried and refused it outright:
 //     failed.
 //
+// The flow starts at chain[first], so a re-drive can resume where the sender
+// stopped, and wraps around to the providers before it. Attempt numbers in the
+// log are positions in the whole chain.
+//
 // The whole flow runs under SendTimeout; each provider call also has its own
 // timeout from its route.
-func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notification, chain []Route) outcome {
+func (d *Deliverer) deliver(ctx context.Context, log *slog.Logger, n domain.Notification, chain []Route, first int) outcome {
 	if len(chain) == 0 {
 		return outcome{state: domain.StateFailed, reason: "no provider for channel " + string(n.Channel)}
 	}
@@ -90,13 +94,22 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 	// provider may have used all of that deadline, and the check is how we learn
 	// that it took the message anyway. It has its own StatusTimeout.
 	parent := ctx
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.SendTimeout)
+	ctx, cancel := context.WithTimeout(ctx, d.cfg.SendTimeout)
 	defer cancel()
 
 	var reasons []string
 	uncertain, skipped := false, false
 	var lastTried string
-	for i, route := range chain {
+	// The order is chain[first:], then the providers before first. A row stays
+	// pending when a provider was skipped, and that provider can sit before the
+	// one the sender last called, so a resumed run ends by trying those too:
+	// failed must only mean every provider refused the message.
+	order := make([]int, 0, len(chain))
+	for k := range chain {
+		order = append(order, (first+k)%len(chain))
+	}
+	for pos, i := range order {
+		route := chain[i]
 		name := route.Provider.Name()
 		if ctx.Err() != nil {
 			log.WarnContext(ctx, "no time left for provider", "attempt", i+1, "provider", name)
@@ -104,7 +117,7 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 			skipped = true
 			continue
 		}
-		id, err := s.attempt(ctx, log, n, i+1, route)
+		id, err := d.attempt(ctx, log, n, i+1, route)
 		if !errors.Is(err, ErrCircuitOpen) {
 			lastTried = name // an open breaker means the provider was never called
 		}
@@ -120,8 +133,8 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 			continue
 		}
 		uncertain = true
-		if i < len(chain)-1 {
-			if id, found := s.checkStatus(parent, log, n, route.Provider); found {
+		if pos < len(order)-1 {
+			if id, found := d.checkStatus(parent, log, n, route.Provider); found {
 				return outcome{state: domain.StateAccepted, provider: name, messageID: id}
 			}
 		}
@@ -138,7 +151,7 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 }
 
 // attempt makes one provider call under its own timeout and logs how it ended.
-func (s *Sender) attempt(ctx context.Context, log *slog.Logger, n domain.Notification, position int, route Route) (string, error) {
+func (d *Deliverer) attempt(ctx context.Context, log *slog.Logger, n domain.Notification, position int, route Route) (string, error) {
 	callCtx, cancel := context.WithTimeout(ctx, route.Timeout)
 	defer cancel()
 	start := time.Now()
@@ -160,13 +173,13 @@ func (s *Sender) attempt(ctx context.Context, log *slog.Logger, n domain.Notific
 
 // checkStatus asks p whether it took the message n, within StatusTimeout. It
 // returns false when p cannot say, so the caller switches provider anyway.
-func (s *Sender) checkStatus(ctx context.Context, log *slog.Logger, n domain.Notification, p ports.Provider) (string, bool) {
+func (d *Deliverer) checkStatus(ctx context.Context, log *slog.Logger, n domain.Notification, p ports.Provider) (string, bool) {
 	checker, ok := p.(ports.StatusChecker)
 	if !ok {
 		log.InfoContext(ctx, "provider cannot check status", "provider", p.Name())
 		return "", false
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, s.cfg.StatusTimeout)
+	checkCtx, cancel := context.WithTimeout(ctx, d.cfg.StatusTimeout)
 	defer cancel()
 	id, found, err := checker.Status(checkCtx, n.IdempotencyKey, n.Channel)
 	switch {
