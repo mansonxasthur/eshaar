@@ -174,7 +174,7 @@ func BenchmarkMarkAcceptedParallel(b *testing.B) {
 
 // BenchmarkMarkAcceptedBatchedReference is NOT how the store writes outcomes. It
 // is an experiment: the same update for 100 rows in one statement, to show what
-// batching the outcome writes (the follow-up in docs/solution.md, on the Phase 7 branch until it merges) would be worth.
+// batching the outcome writes (the follow-up in docs/solution.md) would be worth.
 func BenchmarkMarkAcceptedBatchedReference(b *testing.B) {
 	s := benchStore(b)
 	ids := seedPending(b, s, b.N)

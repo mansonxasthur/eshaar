@@ -11,7 +11,7 @@ go test -run '^$' -bench Validate -benchmem ./internal/domain     # one benchmar
 
 Compare two runs with `benchstat` (`go install golang.org/x/perf/cmd/benchstat@latest`): run each side with `-count=10`, save the outputs, and pass both files to it.
 
-The Postgres benchmarks share one container for the whole run, which the testcontainers reaper removes when the process exits. This document links to `docs/load_test.md` and `docs/solution.md`, which arrive with the Phase 7 pull request.
+The Postgres benchmarks share one container for the whole run, which the testcontainers reaper removes when the process exits.
 
 ## Baseline
 
