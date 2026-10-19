@@ -73,6 +73,17 @@ With `synchronous_commit=off` the ramp continued (30-second runs, three rows per
 
 The sender then sustains about **5,500 rows/s (about 1,800 req/s)**, calculated as the rows of a run divided by the run plus the time it took to clear, with Postgres still at 73 to 86 % of the shared cores and the sender at 26 to 30 %. This setting trades a few hundred milliseconds of committed rows after a Postgres crash for speed, which breaks save-before-send, so it is evidence and not a recommendation.
 
+### Cross-check with the micro-benchmarks
+
+`docs/benchmarks.md` measures the pieces alone, without the other processes competing for the cores, and agrees with the finding above:
+
+| Piece | Micro-benchmark | Meaning for the load test |
+| --- | --- | --- |
+| Dispatcher handler | 36 µs per request on one CPU, 5.4 µs on 4 CPUs (about 185,000 requests/s) | The 14,800 requests/s measured end to end is limited by the HTTP server, Kafka and the shared machine, not by the handler |
+| Sender, one channel | 7 to 10 µs, with the breaker and limiter at a few hundred nanoseconds | Consistent with the sender using about 30 % of a core |
+| Postgres `MarkAccepted`, one row per commit | 3,700 to 4,600 rows/s from one goroutine, 9,500 to 11,500 from 128 | Three to four times the 2,700 rows/s per sender seen in the load test. The benchmark has the Postgres container to itself, while in the load test inserts, Kafka, the dispatcher and the generator share the four cores, so only the limit and the ratio carry over, not the rate. More goroutines do help up to a point (one goroutine to 128 gave about 2.4 times); beyond the 256 of the load test's pool the commits are the limit, which is why 1,024 did not help |
+| The same update, 100 rows per statement | 33,000 to 40,000 rows/s | Roughly 3 to 4 times the per-row parallel rate: the expected gain from batching the outcome writes, on this machine |
+
 ## 2. Extrapolation to 500K req/s
 
 Instances needed = 500,000 divided by the per-instance rate. The inputs are measured here, and the result is an estimate, not a test result.
@@ -85,7 +96,7 @@ Instances needed = 500,000 divided by the per-instance rate. The inputs are meas
 
 The part that does not scale by adding instances is Postgres. At 500K req/s with three rows per request the peak is 1.5M inserted rows/s and 1.5M row updates/s, 3M writes/s, which is what the decision log already estimated. At the measured 2,700 rows/s per node (one insert and one update per row, each update its own commit) that is more than 550 such nodes. Three changes would close most of that gap, in this order:
 
-1. **Batch the outcome writes.** Insert is already one statement per batch of up to 500 rows (`InsertPending`); `MarkAccepted` is not. Writing the outcomes of a batch in one `UPDATE ... FROM unnest(...)` removes the per-row commit, which the `synchronous_commit` run suggests is worth about 2x on this machine and more with larger batches. This is the highest-value change and is listed as follow-up work, not done in this phase.
+1. **Batch the outcome writes.** Insert is already one statement per batch of up to 500 rows (`InsertPending`); `MarkAccepted` is not. Writing the outcomes of a batch in one `UPDATE ... FROM unnest(...)` removes the per-row commit, which should be worth more than the roughly 2x that removing the WAL flush gave (5,500 against 2,700 rows/s), because a batch also saves round trips and index work; a benchmark of the batched statement for 100 rows measured roughly 3 to 4 times the per-row parallel rate (33,000 to 40,000 against 9,500 to 11,500 rows/s). This is the highest-value change and is listed as follow-up work, not done in this phase.
 2. **Partition or shard `notifications`** by idempotency key hash across several Postgres primaries, so each takes a share of the writes. Insert, outcome and janitor queries all carry the key or the row id.
 3. **Fewer indexes on the hot path.** The updates are not HOT because they touch indexed columns (`state`, `provider_message_id`, `last_provider`); keeping the unique and partial indexes the design needs but fillfactor-tuning and trimming the rest would let more updates stay in the page.
 

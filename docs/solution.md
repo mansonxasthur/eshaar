@@ -102,6 +102,8 @@ Full tables, setup, and commands are in `docs/load_test.md`. The test ran on one
 
 **Bottleneck.** Postgres, because `MarkAccepted` is a separate transaction and WAL flush for each row. Evidence: Postgres at 79 to 89 % CPU against the sender's 23 to 34 %; 26,500 commits for 27,000 accepted rows in 10 seconds; no improvement from a pool four times larger (p99 worse); and at 1,200 requests/s a median of 5 ms instead of 378 ms with `synchronous_commit=off`. That setting weakens durability, so it is evidence, not a fix.
 
+**Micro-benchmarks** (`docs/benchmarks.md`) give the cost of each piece and agree with the load test. The dispatcher handler takes 36 microseconds per request on one CPU and about 185,000 requests/s on four, of which `Request.Validate` is 26 microseconds; a channel send in the sender takes 7 to 10 microseconds, and the circuit breaker and outbound limiter a few hundred nanoseconds each; the webhook service handles an event in 7.5 microseconds at throughput. None of that explains the 900 requests/s limit. The Postgres outcome write does: one `UPDATE` and commit per row reached 3,700 to 4,600 rows/s from one goroutine and 9,500 to 11,500 from 128, and the same update for 100 rows in one statement reached 33,000 to 40,000 rows/s, roughly **3 to 4 times** the per-row rate (about 3.5 at the mid-points). Inserts of 150 rows in one statement ran at 24,000 to 26,000 rows/s.
+
 **When a provider fails** (600 requests/s of email and SMS for 30 seconds, `sms-a` failing):
 
 | Failure of `sms-a` | What happened |
@@ -122,7 +124,7 @@ Instances needed = 500,000 divided by the rate per instance. The results below a
 - **Kafka.** 12 partitions are far too few: a consumer group cannot have more active consumers than partitions. Use 64 or more, replication of 3, a producer that batches and compresses, and watch consumer lag, which is the signal that the sender fell behind and which the janitors cannot see.
 - **Sender.** CPU is not the limit: about 0.3 of a core at 5,500 rows/s, or roughly 24,000 requests/s per 4-core instance if the database could take the writes, so about 21 instances.
 - **Postgres is the limit.** At 500K req/s with three rows per request the peak is 1.5M inserted rows/s plus the same number of updates, and the decision log counts about three writes per notification including the webhook's final state. At the measured 2,700 rows/s per node with a commit per row this is over 550 nodes. The changes that matter, in order:
-  1. **Batch the outcome writes.** `InsertPending` already inserts a whole batch in one statement; `MarkAccepted` should write a batch of outcomes in one `UPDATE ... FROM unnest(...)` and webhook states are already applied in batches.
+  1. **Batch the outcome writes.** `InsertPending` already inserts a whole batch in one statement; `MarkAccepted` should write a batch of outcomes in one `UPDATE ... FROM unnest(...)` and webhook states are already applied in batches. The benchmark of exactly that statement for 100 rows is roughly 3 to 4 times the per-row parallel rate (33,000 to 40,000 against 9,500 to 11,500 rows/s).
   2. **Shard `notifications` by a hash of the idempotency key** across several primaries; the insert, outcome and janitor statements all carry the key or a row id.
   3. **Cut index maintenance on the hot path.** The updates are not HOT because they change indexed columns.
   4. **Retention.** `webhook_events` and `notifications` need partitioning by time and a drop plan.
@@ -136,7 +138,7 @@ Instances needed = 500,000 divided by the rate per instance. The results below a
 
 ## 9. What I would do differently with more time
 
-1. **Batch the outcome writes** (section 7). It is the most valuable change and the measurement points straight at it.
+1. **Batch the outcome writes** (section 7). It is the most valuable change and both the load test and the micro-benchmarks (roughly 3 to 4 times the per-row rate) point straight at it.
 2. **A transactional outbox or direct write path.** The dispatcher publishes to Kafka and the sender then writes to Postgres. For lower latency and fewer moving parts, the dispatcher could write batches to a sharded store and publish from there, at the cost of making the dispatcher depend on the database.
 3. **A different store for the hot path.** A log-structured or wide-column store, or Postgres with a narrow `pending` table and a separate history table, would cost less per state change than updating one wide, heavily indexed row.
 4. **Recovery that scales.** Make the janitor's rate adapt to the backlog, add an operator command to re-drive a channel after an outage, and a dead-letter topic for undecodable Kafka records.

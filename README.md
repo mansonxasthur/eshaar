@@ -55,6 +55,7 @@ These are the assumptions behind the design. The decision log has the reasoning;
 | [`docs/implementation_plan.md`](docs/implementation_plan.md) | The seven phases, what each delivers, its tests and its status |
 | [`docs/api.md`](docs/api.md) | The HTTP endpoints, request and response rules, and configuration |
 | [`docs/load_test.md`](docs/load_test.md) | Load test and provider failure results, with the commands to reproduce them |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | Micro-benchmarks of the hot paths with a baseline (added by the benchmarks pull request) |
 | [`CLAUDE.md`](CLAUDE.md) | Working rules for the repository: commands, commit rules, workflow, architecture rules |
 
 ### Plans under `_plans/`
@@ -267,3 +268,22 @@ The endpoints and configuration are in [`docs/api.md`](docs/api.md); how the loa
 ## Status
 
 All seven phases are done. The load test found Postgres to be the first bottleneck, at about 900 requests per second per sender with a default Postgres; batching the outcome writes is the first follow-up. 500K requests per second is extrapolated from per-instance measurements, not demonstrated. See [`docs/solution.md`](docs/solution.md), sections 6 and 7.
+
+## Benchmark results
+
+Go micro-benchmarks of the hot paths (`make bench-short`, and `make bench` for the Postgres ones, which need Docker). The full table, the method and what they do not cover are in [`docs/benchmarks.md`](docs/benchmarks.md). Measured on an Intel Core i5-4570 (4 cores) with Go 1.26 and Postgres 16 at default settings. The runs are noisy (up to 40 % between repeats of one benchmark), so read them as orders of magnitude.
+
+| Path | Benchmark | Result |
+| --- | --- | --- |
+| Dispatcher | Validating a three-channel request | 26 µs, 62 allocations |
+| Dispatcher | Whole handler: key check, rate limit, decode, validate, publish to a no-op publisher | 36 µs on one CPU; 5.4 µs on 4 CPUs (about 185,000 requests/s) |
+| Kafka record | Encode / decode | 4.4 µs / 9.6 µs |
+| Sender | One channel send, first provider accepts / after one fallback | 6.9 µs / 9.7 µs |
+| Sender | Circuit breaker closed / open, outbound rate limiter (4 CPUs) | 287 ns / 147 ns / 293 ns, no allocations |
+| Webhook | Verify the signature / parse an event | 3.8 µs / 13.6 µs |
+| Webhook | Whole service with batching, store answers at once | 7.5 µs per event at throughput (about 130,000 events/s) |
+| Postgres | `InsertPending`, 150 rows in one statement | 24,000 to 26,000 rows/s |
+| Postgres | `MarkAccepted`, one row per commit: one goroutine / 128 goroutines | 3,700 to 4,600 / 9,500 to 11,500 rows/s |
+| Postgres | The same update, 100 rows in one statement (a benchmark only, not in the store) | 33,000 to 40,000 rows/s |
+
+What they say: the CPU cost of the dispatcher, sender and webhook is small, and the dispatcher handler is far from being the limit: its upper bound is about 185,000 requests/s on four CPUs (no network, a no-op publisher), against about 14,800 sustained end to end in the load test, where the HTTP server, Kafka and the shared machine take the rest. The Postgres outcome write is what limits the system, and batching it is worth roughly **3 to 4 times** the per-row rate (about 3.5 at the mid-points), which is the first follow-up in [`docs/solution.md`](docs/solution.md).
