@@ -186,3 +186,82 @@ func TestMarkAcceptedAndFailedOnlyMovePendingRows(t *testing.T) {
 		t.Errorf("failed row became %s with provider %v", state, provider)
 	}
 }
+
+func TestMarkUnresolvedOnlyMovesPendingRows(t *testing.T) {
+	s, conn := newStore(t)
+	ctx := context.Background()
+	got, err := s.InsertPending(ctx, rows("k1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	email, sms := got[0].ID, got[1].ID
+
+	if err := s.MarkUnresolved(ctx, email, "both providers timed out"); err != nil {
+		t.Fatal(err)
+	}
+	if state, reason, _ := stateOf(t, conn, email); state != "unresolved" || reason == nil || *reason != "both providers timed out" {
+		t.Errorf("email row = %s %v", state, reason)
+	}
+
+	if err := s.MarkAccepted(ctx, sms, "provider-a", "msg-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkUnresolved(ctx, sms, "late"); err != nil {
+		t.Fatal(err)
+	}
+	if state, _, _ := stateOf(t, conn, sms); state != "accepted" {
+		t.Errorf("accepted row became %s", state)
+	}
+
+	// A failed row keeps its state and reason.
+	got, err = s.InsertPending(ctx, rows("k2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkFailed(ctx, got[0].ID, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkUnresolved(ctx, got[0].ID, "late"); err != nil {
+		t.Fatal(err)
+	}
+	if state, reason, _ := stateOf(t, conn, got[0].ID); state != "failed" || reason == nil || *reason != "rejected" {
+		t.Errorf("failed row became %s %v", state, reason)
+	}
+}
+
+func TestRecordLastProviderOnlyTouchesPendingRows(t *testing.T) {
+	s, conn := newStore(t)
+	ctx := context.Background()
+	got, err := s.InsertPending(ctx, rows("k1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, accepted := got[0].ID, got[1].ID
+
+	if err := s.RecordLastProvider(ctx, pending, "sms-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkAccepted(ctx, accepted, "sms-b", "msg-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordLastProvider(ctx, accepted, "sms-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	last := func(id string) *string {
+		var p *string
+		if err := conn.QueryRow(ctx, `SELECT last_provider FROM notifications WHERE id = $1`, id).Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if p := last(pending); p == nil || *p != "sms-a" {
+		t.Errorf("pending row last_provider = %v, want sms-a", p)
+	}
+	if p := last(accepted); p != nil {
+		t.Errorf("accepted row last_provider = %v, want it untouched", *p)
+	}
+	if state, _, _ := stateOf(t, conn, pending); state != "pending" {
+		t.Errorf("row became %s", state)
+	}
+}

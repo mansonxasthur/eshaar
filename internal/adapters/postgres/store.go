@@ -116,12 +116,35 @@ WHERE id = $1 AND state = 'pending'`, id, provider, providerMessageID)
 
 // MarkFailed implements ports.NotificationStore.
 func (s *Store) MarkFailed(ctx context.Context, id, reason string) error {
+	return s.markPending(ctx, id, "failed", reason)
+}
+
+// MarkUnresolved implements ports.NotificationStore.
+func (s *Store) MarkUnresolved(ctx context.Context, id, reason string) error {
+	return s.markPending(ctx, id, "unresolved", reason)
+}
+
+// markPending moves a pending row to a state that carries a reason. The state
+// guard makes a late call a no-op.
+func (s *Store) markPending(ctx context.Context, id, state, reason string) error {
 	_, err := s.pool.Exec(ctx, `
 UPDATE notifications
-SET state = 'failed', failure_reason = $2, updated_at = now()
-WHERE id = $1 AND state = 'pending'`, id, reason)
+SET state = $2, failure_reason = $3, updated_at = now()
+WHERE id = $1 AND state = 'pending'`, id, state, reason)
 	if err != nil {
-		return fmt.Errorf("mark %s failed: %w", id, err)
+		return fmt.Errorf("mark %s %s: %w", id, state, err)
+	}
+	return nil
+}
+
+// RecordLastProvider implements ports.NotificationStore.
+func (s *Store) RecordLastProvider(ctx context.Context, id, provider string) error {
+	_, err := s.pool.Exec(ctx, `
+UPDATE notifications
+SET last_provider = $2, updated_at = now()
+WHERE id = $1 AND state = 'pending'`, id, provider)
+	if err != nil {
+		return fmt.Errorf("record last provider of %s: %w", id, err)
 	}
 	return nil
 }

@@ -38,7 +38,7 @@ Hexagonal. Import direction is enforced by convention, so check it in review:
 
 - `internal/domain`: notification, channel, forward-only state machine. Imports nothing from the project or infrastructure.
 - `internal/ports`: interfaces for publishing, consuming, storing notifications and sending through a provider. Imports only the domain.
-- `internal/sender`: the sender service (batch loop, bounded pool, outbound limiter). Imports only the domain and ports.
+- `internal/sender`: the sender service (batch loop, bounded pool, per-provider rate limiter and circuit breaker, provider fallback chain). Imports only the domain and ports.
 - `internal/adapters`: Kafka, Postgres, mock provider, HTTP. Import ports and the domain, never each other.
 - `cmd/{dispatcher,sender,webhook,janitor}`: the only places that wire adapters to ports. Each is a separate process.
 - `cmd/migrate`: one-shot tool (`make migrate`) that applies the Postgres migrations and exits; it is not part of the runtime flow.
@@ -48,9 +48,9 @@ Runtime flow (spans several of the entry points):
 
 1. **dispatcher**: API-key check, in-memory rate limit, validation, publish to Kafka keyed by `idempotency_key` (not recipient, to avoid hot partitions), then `202` only after Kafka confirms.
 2. **sender**: a consumer group. It inserts one `pending` row per channel (unique on idempotency key + channel) and only then acks Kafka, so a redelivery hits the unique constraint and is treated as already saved. Channel sends then run in goroutines, bounded by a pool; when the pool is full the consumer stops reading.
-3. Each channel send tries provider A, then falls back to B on failure, rate-limit response, or timeout (after a status check against A by idempotency key when supported). Every attempt's outcome is written to `notifications`.
+3. Each channel has a chain of providers (A, B, maybe C) ordered by `priority` (1 first), each with its own rate limit, timeout and circuit breaker from `infra/providers.yaml`. A send tries them in priority order and moves on after a failure, a rate-limit response, or a timeout (after a status check by idempotency key when supported). The chain's final outcome (`accepted`, `unresolved` or `failed`) is written to `notifications`; every attempt is logged.
 4. **webhook**: validates provider events, stores them in `webhook_events` (unique on provider + event id), and resolves them to the notification. It only records final state and never triggers fallback.
-5. **janitor**: a recovery job re-drives `pending` rows that were never claimed and a sweeper marks stale claimed rows `unresolved`. Both claim rows with a single atomic Postgres statement so two instances never take the same rows.
+5. **janitor**: a recovery job re-drives `pending` rows that were never claimed or whose claim is older than 10 seconds, up to 3 attempts, resuming the provider chain from the last provider called (`last_provider`) and checking its status first. A sweeper runs every 10 minutes and marks rows that used all their attempts `unresolved`. Both claim rows with a single atomic Postgres statement so two instances never take the same rows.
 
 Notification states: `pending`, `accepted`, `delivered`, `failed`, `unresolved`; transitions only move forward, except that a late webhook may move `unresolved` to a final state.
 

@@ -11,12 +11,10 @@ import (
 	"time"
 
 	"github.com/mansonxasthur/eshaar/internal/adapters/kafka"
-	"github.com/mansonxasthur/eshaar/internal/adapters/mock"
 	"github.com/mansonxasthur/eshaar/internal/adapters/postgres"
 	"github.com/mansonxasthur/eshaar/internal/domain"
 	"github.com/mansonxasthur/eshaar/internal/platform/config"
 	"github.com/mansonxasthur/eshaar/internal/platform/logging"
-	"github.com/mansonxasthur/eshaar/internal/ports"
 	"github.com/mansonxasthur/eshaar/internal/sender"
 )
 
@@ -33,24 +31,48 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// PROVIDER_RATE_LIMIT_RPS was replaced by the rps of each provider in the
+	// providers file; a leftover value would otherwise be ignored without a word.
+	if os.Getenv("PROVIDER_RATE_LIMIT_RPS") != "" {
+		log.Warn("PROVIDER_RATE_LIMIT_RPS is no longer used; set rps per provider in the providers file", "file", cfg.ProvidersFile)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, cfg, log, defaultProviders(cfg))
+	specs, err := config.LoadProviders(cfg.ProvidersFile, os.Getenv)
+	if err != nil {
+		return err
+	}
+	routes, err := buildRoutes(specs)
+	if err != nil {
+		return err
+	}
+	// Log the effective order, since priorities can come from the environment.
+	for _, c := range domain.Channels() {
+		var names []string
+		for _, r := range routes[c] {
+			names = append(names, r.Provider.Name())
+		}
+		log.Info("provider chain", "channel", c, "providers", names)
+	}
+	return serve(ctx, cfg, log, routes)
 }
 
-// defaultProviders sends every channel through the mock provider, behind the
-// outbound rate limit. Phase 4 replaces it with a provider A and B per channel.
-func defaultProviders(cfg config.Config) map[domain.Channel]ports.Provider {
-	p := sender.WithRateLimit(mock.NewProvider("mock"), cfg.ProviderRateLimit)
-	providers := make(map[domain.Channel]ports.Provider)
-	for _, c := range domain.Channels() {
-		providers[c] = p
+// senderConfig maps the process configuration to the sender's.
+func senderConfig(cfg config.Config) sender.Config {
+	return sender.Config{
+		PoolSize:      cfg.SenderPoolSize,
+		SendTimeout:   cfg.SenderSendTimeout,
+		StatusTimeout: cfg.ProviderStatusTimeout,
+		// The longest send is the chain deadline, then a status check past it,
+		// then the outcome write (5 s), with some margin.
+		DrainTimeout: cfg.SenderSendTimeout + 10*time.Second,
+		MinBackoff:   100 * time.Millisecond,
+		MaxBackoff:   5 * time.Second,
 	}
-	return providers
 }
 
 // serve wires the adapters to the sender and runs it until ctx is done.
-func serve(ctx context.Context, cfg config.Config, log *slog.Logger, providers map[domain.Channel]ports.Provider) error {
+func serve(ctx context.Context, cfg config.Config, log *slog.Logger, providers map[domain.Channel][]sender.Route) error {
 	store, err := postgres.NewStore(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -62,13 +84,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger, providers m
 	}
 	defer consumer.Close()
 
-	s, err := sender.New(consumer, store, providers, sender.Config{
-		PoolSize:     cfg.SenderPoolSize,
-		SendTimeout:  cfg.SenderSendTimeout,
-		DrainTimeout: cfg.SenderSendTimeout + 5*time.Second,
-		MinBackoff:   100 * time.Millisecond,
-		MaxBackoff:   5 * time.Second,
-	}, log)
+	s, err := sender.New(consumer, store, providers, senderConfig(cfg), log)
 	if err != nil {
 		return err
 	}

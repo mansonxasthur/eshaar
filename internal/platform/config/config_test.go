@@ -138,7 +138,8 @@ func TestLoadSenderDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.KafkaGroupID != "eshaar-sender" || cfg.SenderPoolSize != 256 || cfg.SenderBatchSize != 500 ||
-		cfg.SenderSendTimeout != 3*time.Second || cfg.ProviderRateLimit != 1000 {
+		cfg.SenderSendTimeout != 4500*time.Millisecond || cfg.ProviderStatusTimeout != 500*time.Millisecond ||
+		cfg.ProvidersFile != "infra/providers.yaml" {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
 }
@@ -146,25 +147,26 @@ func TestLoadSenderDefaults(t *testing.T) {
 func TestLoadSenderOverrides(t *testing.T) {
 	cfg, err := Load(env(map[string]string{
 		EnvKafkaGroupID: "g2", EnvSenderPoolSize: "8", EnvSenderBatchSize: "50",
-		EnvSenderSendTimeout: "1500ms", EnvProviderRateLimit: "2.5",
+		EnvSenderSendTimeout: "1500ms", EnvProviderStatusTimeout: "90ms", EnvProvidersFile: "/etc/p.yaml",
 	}), NeedSender)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.KafkaGroupID != "g2" || cfg.SenderPoolSize != 8 || cfg.SenderBatchSize != 50 ||
-		cfg.SenderSendTimeout != 1500*time.Millisecond || cfg.ProviderRateLimit != 2.5 {
+		cfg.SenderSendTimeout != 1500*time.Millisecond || cfg.ProviderStatusTimeout != 90*time.Millisecond ||
+		cfg.ProvidersFile != "/etc/p.yaml" {
 		t.Errorf("overrides ignored: %+v", cfg)
 	}
 }
 
 func TestLoadSenderReportsEveryProblem(t *testing.T) {
 	_, err := Load(env(map[string]string{
-		EnvSenderPoolSize: "0", EnvSenderBatchSize: "x", EnvSenderSendTimeout: "soon", EnvProviderRateLimit: "-1",
+		EnvSenderPoolSize: "0", EnvSenderBatchSize: "x", EnvSenderSendTimeout: "soon", EnvProviderStatusTimeout: "-1s",
 	}), NeedSender)
 	if err == nil {
 		t.Fatal("bad sender settings accepted")
 	}
-	for _, name := range []string{EnvSenderPoolSize, EnvSenderBatchSize, EnvSenderSendTimeout, EnvProviderRateLimit} {
+	for _, name := range []string{EnvSenderPoolSize, EnvSenderBatchSize, EnvSenderSendTimeout, EnvProviderStatusTimeout} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error does not mention %s: %v", name, err)
 		}

@@ -20,4 +20,14 @@ type NotificationStore interface {
 	// MarkFailed moves a pending row to failed with a reason. It does nothing if
 	// the row is no longer pending.
 	MarkFailed(ctx context.Context, id, reason string) error
+
+	// MarkUnresolved moves a pending row to unresolved with a reason, when
+	// delivery is uncertain because a provider timed out. It does nothing if the
+	// row is no longer pending.
+	MarkUnresolved(ctx context.Context, id, reason string) error
+
+	// RecordLastProvider notes, on a row that stays pending, the last provider
+	// the send called, so the janitor can resume the chain from it. It does
+	// nothing if the row is no longer pending.
+	RecordLastProvider(ctx context.Context, id, provider string) error
 }

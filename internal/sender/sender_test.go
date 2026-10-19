@@ -84,10 +84,12 @@ type fakeStore struct {
 	insertErrs []error                        // returned by successive InsertPending calls
 	accepted   map[string][2]string           // id -> provider, message id
 	failed     map[string]string              // id -> reason
+	unresolved map[string]string              // id -> reason
+	lastTried  map[string]string              // id -> last provider recorded on a pending row
 }
 
 func newStore(rec *recorder) *fakeStore {
-	return &fakeStore{rec: rec, rows: map[string]domain.Notification{}, accepted: map[string][2]string{}, failed: map[string]string{}}
+	return &fakeStore{rec: rec, rows: map[string]domain.Notification{}, accepted: map[string][2]string{}, failed: map[string]string{}, unresolved: map[string]string{}, lastTried: map[string]string{}}
 }
 
 func (s *fakeStore) InsertPending(_ context.Context, rows []domain.Notification) ([]domain.Notification, error) {
@@ -128,6 +130,20 @@ func (s *fakeStore) MarkFailed(_ context.Context, id, reason string) error {
 	return nil
 }
 
+func (s *fakeStore) MarkUnresolved(_ context.Context, id, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unresolved[id] = reason
+	return nil
+}
+
+func (s *fakeStore) RecordLastProvider(_ context.Context, id, provider string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastTried[id] = provider
+	return nil
+}
+
 type fakeProvider struct {
 	rec  *recorder
 	send func(ctx context.Context, n domain.Notification) (string, error)
@@ -155,7 +171,7 @@ func req(key string, channels ...domain.Channel) domain.Request {
 }
 
 func testConfig() Config {
-	return Config{PoolSize: 4, SendTimeout: time.Second, DrainTimeout: time.Second, MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond}
+	return Config{PoolSize: 4, SendTimeout: time.Second, StatusTimeout: time.Second, DrainTimeout: time.Second, MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond}
 }
 
 type harness struct {
@@ -173,9 +189,9 @@ func newHarness(t *testing.T, cfg Config, batches ...*fakeBatch) *harness {
 		b.rec = rec
 	}
 	h := &harness{rec: rec, consumer: &fakeConsumer{rec: rec, batches: batches}, store: newStore(rec), provider: &fakeProvider{rec: rec}}
-	providers := map[domain.Channel]ports.Provider{}
+	providers := map[domain.Channel][]Route{}
 	for _, c := range domain.Channels() {
-		providers[c] = h.provider
+		providers[c] = []Route{{Provider: h.provider, Timeout: time.Second}}
 	}
 	s, err := New(h.consumer, h.store, providers, cfg, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -292,20 +308,20 @@ func TestProviderErrorMarksFailed(t *testing.T) {
 	stop := h.run(t)
 	eventually(t, "a failed row", func() bool { h.store.mu.Lock(); defer h.store.mu.Unlock(); return len(h.store.failed) == 1 })
 	stop()
-	if got := h.store.failed["k1|sms"]; got != "boom" {
+	if got := h.store.failed["k1|sms"]; got != "fake: boom" {
 		t.Errorf("failure reason = %q", got)
 	}
 }
 
-func TestSendTimeoutMarksFailed(t *testing.T) {
+func TestSendTimeoutMarksUnresolved(t *testing.T) {
 	cfg := testConfig()
 	cfg.SendTimeout = 20 * time.Millisecond
 	h := newHarness(t, cfg, &fakeBatch{reqs: []domain.Request{req("k1", domain.ChannelSMS)}})
 	h.provider.send = func(ctx context.Context, _ domain.Notification) (string, error) { <-ctx.Done(); return "", ctx.Err() }
 	stop := h.run(t)
-	eventually(t, "a failed row", func() bool { h.store.mu.Lock(); defer h.store.mu.Unlock(); return len(h.store.failed) == 1 })
+	eventually(t, "an unresolved row", func() bool { h.store.mu.Lock(); defer h.store.mu.Unlock(); return len(h.store.unresolved) == 1 })
 	stop()
-	if got := h.store.failed["k1|sms"]; !strings.Contains(got, "deadline exceeded") {
+	if got := h.store.unresolved["k1|sms"]; !strings.Contains(got, "deadline exceeded") {
 		t.Errorf("failure reason = %q", got)
 	}
 }
@@ -366,15 +382,30 @@ func TestShutdownWaitsForInFlightSends(t *testing.T) {
 }
 
 func TestNewValidatesConfig(t *testing.T) {
-	bad := []Config{
-		{PoolSize: 0, SendTimeout: time.Second, MinBackoff: 1, MaxBackoff: 1},
-		{PoolSize: 1, SendTimeout: 0, MinBackoff: 1, MaxBackoff: 1},
-		{PoolSize: 1, SendTimeout: time.Second, MinBackoff: 0, MaxBackoff: 1},
-		{PoolSize: 1, SendTimeout: time.Second, MinBackoff: 2, MaxBackoff: 1},
+	var bad []Config
+	with := func(change func(*Config)) {
+		cfg := testConfig()
+		change(&cfg)
+		bad = append(bad, cfg)
 	}
+	with(func(c *Config) { c.PoolSize = 0 })
+	with(func(c *Config) { c.SendTimeout = 0 })
+	with(func(c *Config) { c.StatusTimeout = 0 })
+	with(func(c *Config) { c.MinBackoff = 0 })
+	with(func(c *Config) { c.MinBackoff, c.MaxBackoff = 2, 1 })
 	for i, cfg := range bad {
 		if _, err := New(nil, nil, nil, cfg, slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("config %d accepted", i)
+		}
+	}
+	badRoutes := map[string][]Route{
+		"nil provider": {{Timeout: time.Second}},
+		"no timeout":   {{Provider: &fakeProvider{}}},
+	}
+	for name, chain := range badRoutes {
+		providers := map[domain.Channel][]Route{domain.ChannelSMS: chain}
+		if _, err := New(nil, nil, providers, testConfig(), slog.New(slog.DiscardHandler)); err == nil {
+			t.Errorf("%s: route accepted", name)
 		}
 	}
 }
@@ -403,5 +434,51 @@ func TestRateLimitWaitHonoursTimeout(t *testing.T) {
 	defer cancel()
 	if _, err := p.Send(ctx, n); err == nil {
 		t.Error("second call within the limit window should fail once the context expires")
+	}
+}
+
+// A provider that panics must not crash the sender; the row stays pending.
+func TestProviderPanicLeavesRowPending(t *testing.T) {
+	h := newHarness(t, testConfig(), &fakeBatch{reqs: []domain.Request{req("k1", domain.ChannelSMS)}})
+	h.provider.send = func(context.Context, domain.Notification) (string, error) { panic("boom") }
+	stop := h.run(t)
+	eventually(t, "the send to start", func() bool { return h.rec.count("send:k1") == 1 })
+	stop()
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if len(h.store.accepted)+len(h.store.failed)+len(h.store.unresolved) != 0 {
+		t.Error("a panicking send was recorded")
+	}
+}
+
+// When no provider was tried the row must stay pending, not be written failed.
+func TestNoProviderTriedLeavesRowPending(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.provider.send = func(context.Context, domain.Notification) (string, error) { return "", ErrCircuitOpen }
+	h.sender.send(context.Background(), domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS})
+	if h.rec.count("send:k1") != 1 {
+		t.Fatal("the provider was not called")
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if len(h.store.accepted)+len(h.store.failed)+len(h.store.unresolved)+len(h.store.lastTried) != 0 {
+		t.Error("a send that never reached a provider was recorded")
+	}
+}
+
+func TestPendingRowRecordsTheLastProviderCalled(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.sender.providers[domain.ChannelSMS] = []Route{
+		{Provider: &stub{name: "sms-a", send: fails(errRejected)}, Timeout: time.Second},
+		{Provider: &stub{name: "sms-b", send: fails(ErrCircuitOpen)}, Timeout: time.Second},
+	}
+	h.sender.send(context.Background(), domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS})
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if got := h.store.lastTried["id1"]; got != "sms-a" {
+		t.Errorf("last provider = %q, want sms-a", got)
+	}
+	if len(h.store.accepted)+len(h.store.failed)+len(h.store.unresolved) != 0 {
+		t.Error("a pending row was given an outcome")
 	}
 }

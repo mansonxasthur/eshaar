@@ -1,0 +1,56 @@
+# Providers per channel, in order of priority: priority 1 is tried first and
+# each higher number takes over when the one before it fails, is rate limited or
+# times out. The order in this file does not matter; priority does, and it is
+# unique within a channel. Priorities can be changed from the environment to
+# reorder a channel without editing the file. Every channel and provider has
+# its own rate limit, call timeout and circuit breaker.
+#
+# Values come from the environment through placeholders: a dollar sign, a
+# brace, the variable name and a closing brace. With no default the variable
+# must be set; adding colon, dash and a value after the name gives it a default.
+# Placeholders are expanded everywhere in this file, even in comments, so none
+# are spelled out here.
+#
+# kind selects the adapter; only the mock exists so far. rps is outbound calls
+# per second to that provider on that channel. timeout limits one call to it.
+# breaker.failures consecutive transient errors or timeouts open it for
+# breaker.open_for, after which one probe call decides whether it closes.
+sms:
+  - name: sms-a
+    kind: mock
+    priority: ${SMS_A_PRIORITY:-1}
+    rps: ${SMS_A_RPS:-1000}
+    timeout: ${SMS_A_TIMEOUT:-2s}
+    breaker: {failures: 5, open_for: 30s}
+  - name: sms-b
+    kind: mock
+    priority: ${SMS_B_PRIORITY:-2}
+    rps: ${SMS_B_RPS:-1000}
+    timeout: ${SMS_B_TIMEOUT:-2s}
+    breaker: {failures: 5, open_for: 30s}
+email:
+  - name: email-a
+    kind: mock
+    priority: ${EMAIL_A_PRIORITY:-1}
+    rps: ${EMAIL_A_RPS:-1000}
+    timeout: ${EMAIL_A_TIMEOUT:-2s}
+    breaker: {failures: 5, open_for: 30s}
+  - name: email-b
+    kind: mock
+    priority: ${EMAIL_B_PRIORITY:-2}
+    rps: ${EMAIL_B_RPS:-1000}
+    timeout: ${EMAIL_B_TIMEOUT:-2s}
+    breaker: {failures: 5, open_for: 30s}
+whatsapp:
+  - name: whatsapp-a
+    kind: mock
+    priority: ${WHATSAPP_A_PRIORITY:-1}
+    rps: ${WHATSAPP_A_RPS:-1000}
+    timeout: ${WHATSAPP_A_TIMEOUT:-2s}
+    breaker: {failures: 5, open_for: 30s}
+  - name: whatsapp-b
+    kind: mock
+    priority: ${WHATSAPP_B_PRIORITY:-2}
+    rps: ${WHATSAPP_B_RPS:-1000}
+    timeout: ${WHATSAPP_B_TIMEOUT:-2s}
+    breaker: {failures: 5, open_for: 30s}

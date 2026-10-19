@@ -162,6 +162,23 @@ func TestMigrationsRoundTrip(t *testing.T) {
 	}
 }
 
+// Migration 0004 drops the janitor indexes built for the first design; they
+// match no query and cost a write on every pending row.
+func TestStaleJanitorIndexesAreDropped(t *testing.T) {
+	conn := newDB(t)
+	var n int
+	err := conn.QueryRow(context.Background(), `
+SELECT count(*) FROM pg_indexes
+WHERE schemaname = current_schema() AND tablename = 'notifications'
+  AND indexname IN ('notifications_unclaimed_pending_idx', 'notifications_claimed_pending_idx')`).Scan(&n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("%d stale janitor indexes still exist", n)
+	}
+}
+
 func TestWebhookEventsUniqueOnProviderAndEventID(t *testing.T) {
 	conn := newDB(t)
 	ctx := context.Background()

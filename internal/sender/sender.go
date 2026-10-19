@@ -16,11 +16,12 @@ import (
 
 // Config tunes the sender.
 type Config struct {
-	PoolSize     int           // concurrent channel sends; a full pool stops the consume loop
-	SendTimeout  time.Duration // limit for one provider call
-	DrainTimeout time.Duration // how long Run waits for in-flight sends on shutdown
-	MinBackoff   time.Duration // first wait after a failed poll or insert
-	MaxBackoff   time.Duration // cap on that wait
+	PoolSize      int           // concurrent channel sends; a full pool stops the consume loop
+	SendTimeout   time.Duration // limit for a whole channel send, across all its providers
+	StatusTimeout time.Duration // limit for the status check after a provider times out
+	DrainTimeout  time.Duration // how long Run waits for in-flight sends on shutdown
+	MinBackoff    time.Duration // first wait after a failed poll or insert
+	MaxBackoff    time.Duration // cap on that wait
 }
 
 // recordTimeout bounds an outcome write, which must not share the send's
@@ -31,7 +32,7 @@ const recordTimeout = 5 * time.Second
 type Sender struct {
 	consumer  ports.Consumer
 	store     ports.NotificationStore
-	providers map[domain.Channel]ports.Provider
+	providers map[domain.Channel][]Route
 	cfg       Config
 	log       *slog.Logger
 	now       func() time.Time
@@ -40,17 +41,33 @@ type Sender struct {
 	wg    sync.WaitGroup
 }
 
-// New returns a Sender. providers maps each channel to the provider that
-// delivers it; a channel without one has its rows failed.
-func New(consumer ports.Consumer, store ports.NotificationStore, providers map[domain.Channel]ports.Provider, cfg Config, log *slog.Logger) (*Sender, error) {
+// New returns a Sender. providers maps each channel to its ordered fallback
+// chain; a channel without one has its rows failed.
+func New(consumer ports.Consumer, store ports.NotificationStore, providers map[domain.Channel][]Route, cfg Config, log *slog.Logger) (*Sender, error) {
 	if cfg.PoolSize < 1 {
 		return nil, errors.New("sender: pool size must be at least 1")
 	}
-	if cfg.SendTimeout <= 0 {
-		return nil, errors.New("sender: send timeout must be positive")
+	if cfg.SendTimeout <= 0 || cfg.StatusTimeout <= 0 {
+		return nil, errors.New("sender: send and status timeouts must be positive")
 	}
 	if cfg.MinBackoff <= 0 || cfg.MaxBackoff < cfg.MinBackoff {
 		return nil, errors.New("sender: backoff needs 0 < min <= max")
+	}
+	for c, chain := range providers {
+		var calls time.Duration
+		for i, r := range chain {
+			if r.Provider == nil || r.Timeout <= 0 {
+				return nil, fmt.Errorf("sender: channel %s provider %d needs a provider and a positive timeout", c, i+1)
+			}
+			calls += r.Timeout
+		}
+		if len(chain) > 1 {
+			calls += time.Duration(len(chain)-1) * cfg.StatusTimeout
+		}
+		if cfg.SendTimeout < calls {
+			log.Warn("send timeout is shorter than every provider call plus status checks; a slow provider can leave the next no time",
+				"channel", c, "send_timeout", cfg.SendTimeout, "needed", calls)
+		}
 	}
 	return &Sender{
 		consumer:  consumer,
@@ -129,38 +146,48 @@ func (s *Sender) dispatch(ctx context.Context, rows []domain.Notification) {
 		go func() {
 			defer s.wg.Done()
 			defer func() { <-s.slots }()
+			// A provider that panics must not take the process, and every other
+			// in-flight send, down. The row stays pending for the janitor.
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.ErrorContext(ctx, "send panicked; row stays pending", "notification_id", n.ID, "channel", n.Channel, "panic", fmt.Sprint(r))
+				}
+			}()
 			s.send(ctx, n)
 		}()
 	}
 }
 
-// send makes the provider call and records its outcome. It does not stop when
+// send runs the fallback flow and records its outcome. It does not stop when
 // ctx is cancelled, so a shutdown does not leave a sent notification unrecorded.
 func (s *Sender) send(ctx context.Context, n domain.Notification) {
 	base := context.WithoutCancel(ctx)
 	log := s.log.With("notification_id", n.ID, "idempotency_key", n.IdempotencyKey, "channel", n.Channel)
 
-	provider, ok := s.providers[n.Channel]
-	if !ok {
-		s.record(base, log, func(ctx context.Context) error {
-			return s.store.MarkFailed(ctx, n.ID, "no provider for channel "+string(n.Channel))
-		})
+	out := s.deliver(base, log, n, s.providers[n.Channel])
+	var write func(context.Context) error
+	switch out.state {
+	case domain.StateAccepted:
+		write = func(ctx context.Context) error { return s.store.MarkAccepted(ctx, n.ID, out.provider, out.messageID) }
+	case domain.StateUnresolved:
+		write = func(ctx context.Context) error { return s.store.MarkUnresolved(ctx, n.ID, failureReason(out.reason)) }
+	case domain.StateFailed:
+		write = func(ctx context.Context) error { return s.store.MarkFailed(ctx, n.ID, failureReason(out.reason)) }
+	default:
+		// Pending: some provider was never tried, so there is no outcome and the
+		// row stays pending for the janitor, which resumes from the last provider
+		// called. Any other state is a bug and is treated the same way, never as
+		// a failure.
+		log.WarnContext(ctx, "no outcome to record; row stays pending for the janitor",
+			"state", out.state, "last_provider", out.lastTried, "reason", out.reason)
+		if out.lastTried != "" {
+			s.record(base, log, func(ctx context.Context) error {
+				return s.store.RecordLastProvider(ctx, n.ID, out.lastTried)
+			})
+		}
 		return
 	}
-
-	sendCtx, cancel := context.WithTimeout(base, s.cfg.SendTimeout)
-	messageID, err := provider.Send(sendCtx, n)
-	cancel()
-	if err != nil {
-		log.WarnContext(ctx, "send failed", "provider", provider.Name(), "error", err)
-		s.record(base, log, func(ctx context.Context) error {
-			return s.store.MarkFailed(ctx, n.ID, failureReason(err))
-		})
-		return
-	}
-	s.record(base, log, func(ctx context.Context) error {
-		return s.store.MarkAccepted(ctx, n.ID, provider.Name(), messageID)
-	})
+	s.record(base, log, write)
 }
 
 // maxReasonLen caps the stored failure reason.
@@ -168,8 +195,8 @@ const maxReasonLen = 500
 
 // failureReason is the text stored in failure_reason. Providers must keep
 // contact details out of their errors; the cap bounds what a verbose one adds.
-func failureReason(err error) string {
-	r := []rune(err.Error())
+func failureReason(text string) string {
+	r := []rune(text)
 	if len(r) > maxReasonLen {
 		r = r[:maxReasonLen]
 	}
