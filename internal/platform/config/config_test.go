@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func env(m map[string]string) func(string) string {
@@ -128,5 +129,51 @@ func TestLoadDispatcherSettingsReportsEveryProblem(t *testing.T) {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error does not mention %s: %v", name, err)
 		}
+	}
+}
+
+func TestLoadSenderDefaults(t *testing.T) {
+	cfg, err := Load(env(nil), NeedSender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KafkaGroupID != "eshaar-sender" || cfg.SenderPoolSize != 256 || cfg.SenderBatchSize != 500 ||
+		cfg.SenderSendTimeout != 3*time.Second || cfg.ProviderRateLimit != 1000 {
+		t.Errorf("defaults not applied: %+v", cfg)
+	}
+}
+
+func TestLoadSenderOverrides(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		EnvKafkaGroupID: "g2", EnvSenderPoolSize: "8", EnvSenderBatchSize: "50",
+		EnvSenderSendTimeout: "1500ms", EnvProviderRateLimit: "2.5",
+	}), NeedSender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KafkaGroupID != "g2" || cfg.SenderPoolSize != 8 || cfg.SenderBatchSize != 50 ||
+		cfg.SenderSendTimeout != 1500*time.Millisecond || cfg.ProviderRateLimit != 2.5 {
+		t.Errorf("overrides ignored: %+v", cfg)
+	}
+}
+
+func TestLoadSenderReportsEveryProblem(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		EnvSenderPoolSize: "0", EnvSenderBatchSize: "x", EnvSenderSendTimeout: "soon", EnvProviderRateLimit: "-1",
+	}), NeedSender)
+	if err == nil {
+		t.Fatal("bad sender settings accepted")
+	}
+	for _, name := range []string{EnvSenderPoolSize, EnvSenderBatchSize, EnvSenderSendTimeout, EnvProviderRateLimit} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error does not mention %s: %v", name, err)
+		}
+	}
+	if _, err := Load(env(map[string]string{EnvSenderSendTimeout: "0s"}), NeedSender); err == nil {
+		t.Error("zero send timeout accepted")
+	}
+	// Sender settings are not checked for a process that does not need them.
+	if _, err := Load(env(map[string]string{EnvSenderPoolSize: "0"}), 0); err != nil {
+		t.Errorf("unneeded settings were validated: %v", err)
 	}
 }

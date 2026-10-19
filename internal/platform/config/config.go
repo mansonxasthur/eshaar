@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Environment variable names.
@@ -21,6 +22,12 @@ const (
 	EnvAPIKeys        = "DISPATCHER_API_KEYS"
 	EnvRateLimitRPS   = "RATE_LIMIT_RPS"
 	EnvRateLimitBurst = "RATE_LIMIT_BURST"
+
+	EnvKafkaGroupID      = "KAFKA_GROUP_ID"
+	EnvSenderPoolSize    = "SENDER_POOL_SIZE"
+	EnvSenderBatchSize   = "SENDER_BATCH_SIZE"
+	EnvSenderSendTimeout = "SENDER_SEND_TIMEOUT"
+	EnvProviderRateLimit = "PROVIDER_RATE_LIMIT_RPS"
 )
 
 // Need selects the settings a process requires. Settings a process does not
@@ -34,6 +41,7 @@ const (
 	NeedKafka
 	NeedHTTP
 	NeedAPIKeys // API keys and the per-key rate limit
+	NeedSender  // consumer group, send pool and outbound rate limit
 )
 
 // Config holds the settings shared by the Eshaar processes.
@@ -46,6 +54,12 @@ type Config struct {
 	APIKeys        []string // accepted X-API-Key values (dispatcher)
 	RateLimitRPS   float64  // requests per second allowed per API key, per instance
 	RateLimitBurst int      // burst size per API key
+
+	KafkaGroupID      string        // consumer group the senders join
+	SenderPoolSize    int           // concurrent channel sends per sender
+	SenderBatchSize   int           // most records read per poll
+	SenderSendTimeout time.Duration // limit for one provider call
+	ProviderRateLimit float64       // provider calls per second per sender
 }
 
 // Load reads the configuration through getenv (os.Getenv in production) and
@@ -75,6 +89,24 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 		}
 		cfg.RateLimitRPS, cfg.RateLimitBurst = rps, burst
 	}
+	if need&NeedSender != 0 {
+		cfg.KafkaGroupID = valueOr(getenv(EnvKafkaGroupID), "eshaar-sender")
+		var err error
+		if cfg.SenderPoolSize, err = positiveInt(getenv, EnvSenderPoolSize, "256"); err != nil {
+			errs = append(errs, err)
+		}
+		if cfg.SenderBatchSize, err = positiveInt(getenv, EnvSenderBatchSize, "500"); err != nil {
+			errs = append(errs, err)
+		}
+		cfg.SenderSendTimeout, err = time.ParseDuration(valueOr(getenv(EnvSenderSendTimeout), "3s"))
+		if err != nil || cfg.SenderSendTimeout <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be a positive duration such as 3s", EnvSenderSendTimeout))
+		}
+		cfg.ProviderRateLimit, err = strconv.ParseFloat(valueOr(getenv(EnvProviderRateLimit), "1000"), 64)
+		if err != nil || math.IsNaN(cfg.ProviderRateLimit) || math.IsInf(cfg.ProviderRateLimit, 0) || cfg.ProviderRateLimit <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be a positive number", EnvProviderRateLimit))
+		}
+	}
 	if need&NeedDatabase != 0 {
 		errs = append(errs, checkDatabaseURL(cfg.DatabaseURL))
 	}
@@ -97,6 +129,15 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 		return Config{}, fmt.Errorf("invalid configuration: %w", err)
 	}
 	return cfg, nil
+}
+
+// positiveInt reads an integer of at least 1, using def when unset.
+func positiveInt(getenv func(string) string, name, def string) (int, error) {
+	n, err := strconv.Atoi(valueOr(getenv(name), def))
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s must be an integer of at least 1", name)
+	}
+	return n, nil
 }
 
 func checkDatabaseURL(s string) error {
