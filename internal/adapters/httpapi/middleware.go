@@ -26,6 +26,10 @@ type ctxKey struct{}
 // callerID identifies the authenticated key without exposing it.
 type callerID [sha256.Size]byte
 
+// hashKey is the one place a key becomes a caller identity, shared by the auth
+// check and the rate limiter so the two always agree.
+func hashKey(key string) callerID { return sha256.Sum256([]byte(key)) }
+
 // APIKeyAuth rejects requests whose X-API-Key is not one of keys, with 401. It
 // validates the key and nothing else: there are no per-key permissions. The
 // matched key's identity is put on the request context for the rate limiter.
@@ -34,7 +38,7 @@ func APIKeyAuth(keys []string) Middleware {
 	hashed := make([]callerID, 0, len(keys))
 	for _, k := range keys {
 		if k != "" {
-			hashed = append(hashed, sha256.Sum256([]byte(k)))
+			hashed = append(hashed, hashKey(k))
 		}
 	}
 	return func(next http.Handler) http.Handler {
@@ -44,7 +48,7 @@ func APIKeyAuth(keys []string) Middleware {
 				writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 				return
 			}
-			got := sha256.Sum256([]byte(key))
+			got := hashKey(key)
 			// Compare against every key, without an early exit, so timing does
 			// not reveal which key matched.
 			found := 0
@@ -55,7 +59,7 @@ func APIKeyAuth(keys []string) Middleware {
 				writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, callerID(got))))
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, got)))
 		})
 	}
 }
@@ -82,7 +86,7 @@ func NewRateLimiter(keys []string, rps float64, burst int) (*RateLimiter, error)
 	}
 	for _, k := range keys {
 		if k != "" {
-			l.buckets[sha256.Sum256([]byte(k))] = rate.NewLimiter(rate.Limit(rps), burst)
+			l.buckets[hashKey(k)] = rate.NewLimiter(rate.Limit(rps), burst)
 		}
 	}
 	return l, nil

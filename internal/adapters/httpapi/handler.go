@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	// maxBodyBytes caps a request body; a notification is a few kilobytes.
-	maxBodyBytes = 1 << 20
+	// maxBodyBytes caps a request body; a notification is a few kilobytes. It
+	// sits well under Kafka's default 1 MB record limit, which a larger record
+	// could never satisfy.
+	maxBodyBytes = 512 << 10
 	// publishTimeout bounds the wait for Kafka to confirm.
 	publishTimeout = 5 * time.Second
 )

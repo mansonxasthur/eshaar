@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaxIdempotencyKeyLen bounds the key, which is used as the Kafka message key
@@ -64,6 +65,14 @@ func (r Request) Validate() error {
 	if strings.TrimSpace(r.NotificationType) == "" {
 		add("notification_type", "is required")
 	}
+	for _, f := range []struct{ name, value string }{
+		{"idempotency_key", r.IdempotencyKey}, {"recipient_id", r.RecipientID},
+		{"notification_type", r.NotificationType}, {"email", r.Email}, {"phone", r.Phone},
+	} {
+		if !storableText(f.value) {
+			add(f.name, "must be valid UTF-8 without NUL characters")
+		}
+	}
 	if len(r.Content) == 0 {
 		add("content", "needs at least one channel")
 	}
@@ -89,6 +98,10 @@ func (r Request) Validate() error {
 		case ChannelSMS, ChannelWhatsApp:
 			needPhone = true
 		}
+		if !storableText(string(r.Content[ch])) || bytes.Contains(bytes.ToLower(r.Content[ch]), []byte(`\u0000`)) {
+			add(field, "must be valid UTF-8 without NUL characters")
+			continue
+		}
 		if err := validateBlock(ch, r.Content[ch]); err != nil {
 			add(field, err.Error())
 		}
@@ -104,6 +117,13 @@ func (r Request) Validate() error {
 		return &ValidationError{Fields: fields}
 	}
 	return nil
+}
+
+// storableText reports whether s can be stored in a Postgres text column: valid
+// UTF-8 with no NUL. Catching it here keeps a 202 from promising a row the
+// sender could never insert.
+func storableText(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
 
 // validateBlock checks one channel's content: SMS carries free text, email and

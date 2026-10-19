@@ -69,6 +69,11 @@ func TestRequestValidate(t *testing.T) {
 		{"empty block", func(r *Request) { r.Content[ChannelSMS] = nil }, []string{"content.sms"}},
 		{"key with surrounding space", func(r *Request) { r.IdempotencyKey = " k1" }, []string{"idempotency_key"}},
 		{"key too long", func(r *Request) { r.IdempotencyKey = strings.Repeat("k", MaxIdempotencyKeyLen+1) }, []string{"idempotency_key"}},
+		{"NUL in recipient", func(r *Request) { r.RecipientID = "a\x00b" }, []string{"recipient_id"}},
+		{"invalid UTF-8 in key", func(r *Request) { r.IdempotencyKey = "a\xffb" }, []string{"idempotency_key"}},
+		{"escaped NUL in content", func(r *Request) {
+			r.Content[ChannelSMS] = json.RawMessage(`{"text":"a\u0000b"}`)
+		}, []string{"content.sms"}},
 		{"several errors at once", func(r *Request) {
 			r.IdempotencyKey, r.Email, r.Phone = "", "", ""
 		}, []string{"idempotency_key", "email", "phone"}},

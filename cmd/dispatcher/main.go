@@ -16,6 +16,7 @@ import (
 	"github.com/mansonxasthur/eshaar/internal/adapters/kafka"
 	"github.com/mansonxasthur/eshaar/internal/platform/config"
 	"github.com/mansonxasthur/eshaar/internal/platform/logging"
+	"github.com/mansonxasthur/eshaar/internal/ports"
 )
 
 func main() {
@@ -36,12 +37,10 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	defer pub.Close()
-	limiter, err := httpapi.NewRateLimiter(cfg.APIKeys, cfg.RateLimitRPS, cfg.RateLimitBurst)
+	handler, err := routes(cfg, pub, log)
 	if err != nil {
 		return err
 	}
-
-	handler := httpapi.NewHandler(pub, log).Routes(httpapi.APIKeyAuth(cfg.APIKeys), limiter.Middleware)
 	srv := httpapi.NewServer(cfg.HTTPAddr, handler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -65,4 +64,13 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	return nil
+}
+
+// routes wires the handler behind API key auth and the per-key rate limit.
+func routes(cfg config.Config, pub ports.Publisher, log *slog.Logger) (http.Handler, error) {
+	limiter, err := httpapi.NewRateLimiter(cfg.APIKeys, cfg.RateLimitRPS, cfg.RateLimitBurst)
+	if err != nil {
+		return nil, err
+	}
+	return httpapi.NewHandler(pub, log).Routes(httpapi.APIKeyAuth(cfg.APIKeys), limiter.Middleware), nil
 }
