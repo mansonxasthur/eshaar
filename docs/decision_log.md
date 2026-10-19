@@ -158,13 +158,50 @@ The design keeps save-before-send, because a send that succeeds without a saved 
 
 ## Webhooks
 
-Webhooks only record the final delivery state. They never trigger a fallback.
+Webhooks only record the final delivery state. They never trigger a fallback. They run in their own process (`cmd/webhook`), and the code is `internal/webhook` (service), `internal/adapters/httpapi` (endpoint) and the Postgres store.
 
-- The endpoint sits on the API entry point and validates each event by provider, using that provider's signature scheme.
-- An authentic event is stored in `webhook_events` and its final state is written to the notification row.
-- A duplicate event, detected by the unique `(provider, event_id)` constraint, is skipped silently and the endpoint returns `200 OK`.
-- The link from an event to a notification relies on the provider echoing the idempotency key or returning a message ID. The mock provider does this, and the document states it as an assumption for real providers.
-- An event can arrive before `provider_message_id` is saved on the notification. The event is still stored, and the link is resolved afterward.
+**Endpoint and authentication**
+
+- `POST /v1/webhooks/{provider}`, where `provider` is the name from `infra/providers.yaml` (`sms-a`). There is no API key and no rate limit in front of it: the signature is the authentication.
+- The signature is the hex HMAC-SHA256 of the raw body in `X-Signature`, keyed with the provider's `webhook_secret` from `providers.yaml`. It is compared in constant time. A wrong signature and an unknown provider get the same `401` and the same body, and an unknown provider costs the same time as a wrong signature, so the endpoint does not say which providers exist.
+- There is no timestamp or replay window. A replayed event is harmless because the unique `(provider, event_id)` constraint and the forward-only state machine absorb it.
+- A secret must be at least 16 characters of letters, digits and `. _ + -` (it comes through a `${...}` placeholder), checked when the process starts. A provider with an empty secret cannot deliver webhooks, and an empty key is never used. One short secret stops the process, so a typo shows at startup and not as lost webhooks; with no secret at all the process refuses to start, before it connects to Postgres. Config errors never print an environment value whose name contains SECRET, KEY, TOKEN or PASS, and `config.Secret` prints as `[redacted]` in logs and JSON.
+
+**Event contract**
+
+- The body is one JSON object with `message_id`, `channel` and `status` required, and `event_id`, `idempotency_key` and `reason` optional. `status` must be `delivered` or `failed`; anything else is a `400`, since the endpoint only records final states. A real provider that sends intermediate statuses (queued, sent) would need a mapping layer in front.
+- Keys are matched exactly (not case-insensitively) because the store reads the same keys from the stored payload with a case-sensitive operator, and the two must agree on which events carry a status. Unknown fields are ignored and kept in the stored payload. A JSON null reads as absent.
+- A body must be valid UTF-8 and must not hold what Postgres cannot store in `jsonb`: the `\u0000` escape, a lone surrogate escape, or a number with an exponent beyond 300. One such event would fail the whole batch it is saved with, and the provider would retry it forever. Arabic text is kept as is. Identifiers are limited to 255 bytes, like the idempotency key, and the reason to 500 characters.
+- The event's channel must be one the provider serves in `providers.yaml`, so a provider cannot report on a channel it does not serve.
+
+**Ingest**
+
+- The endpoint stays thin: validate, queue, wait. `Flushers` workers each gather up to `WEBHOOK_BATCH_SIZE` events for at most `WEBHOOK_FLUSH_INTERVAL` and save them with one SQL statement. The request answers `200` only after its event is stored, so a provider is never told `200` for a lost event; a store failure or a wait past 5 s is a `503`, and the provider retries.
+- A batch that fails is retried one event at a time, so a single event the database refuses fails only its own request. It stops after two failures in a row (the database is likely down) and does not isolate at all after a timeout. If a request is cancelled while its event waits, the event is still saved.
+- A full queue holds requests back until their own context ends, so pressure shows up as slow answers and then `503`, not as memory growth.
+- Shutdown stops the HTTP server first, then the service saves what is queued, giving up after one flush timeout and answering the rest `503` so their providers retry.
+- Refused and malformed events are logged at most once a second per kind, with a count of the suppressed ones, so a rotated secret shows at the default level without flooding the log.
+
+**Resolving an event to a notification**
+
+- By the provider's message id: the row that provider accepted (`provider`, `provider_message_id`, same channel), in any state.
+- If no row holds that id, by idempotency key and channel, but only for an `unresolved` row that has no message id: a send that timed out before any provider named one. A row accepted by one provider is never matched by key, so a late event from a provider the send fell over from cannot overwrite the outcome of the provider that took it. A `pending` row is not matched at all.
+- Within a channel, any provider with a valid secret can finalize an unresolved row of that channel through the key fallback. The row is uncertain anyway, and the webhook is the first proof of who took it. On such a row the event's provider and message id are recorded (unless another row already holds that id), and `failure_reason` is replaced by the event's reason for `failed`, or cleared for `delivered`.
+
+**Applying the state**
+
+- One statement saves the events and applies the states: it moves a row to `delivered` or `failed` only from `accepted` or `unresolved`, the transitions `domain.CanTransition` allows, so a final state stays final and a duplicate is a no-op. Of several events in one batch for one notification, the first in order wins.
+- A duplicate `(provider, event_id)` is skipped silently and not applied again, whatever status it carries. An event with no `event_id` is never deduplicated by the constraint; applying its state again is a no-op.
+- Two webhook processes touching the same rows can deadlock or collide on the unique index; the statement fails, the endpoint answers `503` and the retry finds the settled rows.
+
+**Events that arrive before the accept**
+
+- An event can arrive before the sender has recorded `accepted`. It is stored with no `notification_id`, and a resolver loop (`WEBHOOK_RESOLVE_INTERVAL`, default 1 s) links it and applies its state once the row can take it. Only events that resolve now count against the batch limit, so events that cannot resolve never hold up the ones behind them.
+- The resolver looks back one hour. An event still unlinked after that (its row was never accepted, or never existed) stays stored for inspection and costs nothing more. Without the window, every tick would re-check every dead event. The window is a constant in the store, not a setting.
+
+**Assumptions**
+
+- The link from an event to a notification relies on the provider returning a message id, and echoing the idempotency key for sends that timed out. The mock provider does both; the solution document states this as an assumption for real providers.
 - Late or out-of-order events cannot move a row backward because transitions only go forward.
 
 ## Trade-offs and scope
@@ -178,6 +215,11 @@ These are the compromises accepted on purpose, and the items left to other servi
 | Janitor re-drives a row up to 3 times, resuming from the last provider called and checking its status first | A provider that cannot report status may still deliver a re-driven row twice; rows that exhaust the attempts wait up to the 10-minute sweeper before they become `unresolved` |
 | Webhooks do not trigger fallback | A provider that accepts and later reports failure leaves the row `failed` |
 | Webhook-to-notification link depends on the provider echoing a reference | Real providers may need a different matching key |
+| Webhook endpoint accepts only `delivered` and `failed` | Intermediate statuses from a real provider get a `400` until a mapping layer exists |
+| The first final event wins | A provider that corrects itself (`failed`, then `delivered`) is not followed; the first final state stays |
+| Events unlinked after one hour are not retried | A webhook for a row accepted more than an hour later stays stored but never applied |
+| Any provider of a channel can finalize an unresolved row of that channel by key | A buggy provider could mark another provider's uncertain row; the row was already uncertain |
+| Webhook writes do not lock rows in a fixed order | A deadlock fails one batch with a `503` and its retry succeeds |
 
 Out of scope:
 
@@ -200,6 +242,7 @@ These topics are deliberately deferred and will be covered in the solution docum
 
 - Settings come from environment variables only (`DATABASE_URL`, `KAFKA_BROKERS`, `KAFKA_TOPIC`, `HTTP_ADDR`, `LOG_LEVEL`), which suits docker-compose and keeps secrets out of files.
 - One `Config` type is shared, but each process names what it needs (`NeedDatabase`, `NeedKafka`, `NeedHTTP`). Unneeded settings are neither required nor validated, so the janitor starts without Kafka and the dispatcher without Postgres.
+- `cmd/webhook` adds `WEBHOOK_BATCH_SIZE` (200), `WEBHOOK_FLUSH_INTERVAL` (20ms), `WEBHOOK_FLUSHERS` (4), `WEBHOOK_FLUSH_TIMEOUT` (5s), `WEBHOOK_QUEUE_SIZE` (two batches per flusher), `WEBHOOK_RESOLVE_INTERVAL` (1s) and `WEBHOOK_RESOLVE_BATCH` (200), and reads `PROVIDERS_CONFIG` for each provider's `webhook_secret` (for example `SMS_A_WEBHOOK_SECRET`). It shares `providers.yaml` and its environment with the sender, so a placeholder added there without a default must be set for both.
 - `KAFKA_TOPIC` defaults to `notifications` and `HTTP_ADDR` to `:8080`. The database URL and brokers have no default, so a missing one fails at startup with every problem listed.
 
 ## Schema and migrations
@@ -221,7 +264,7 @@ These topics are deliberately deferred and will be covered in the solution docum
 | `notifications (idempotency_key, channel)` unique | Webhook lookup by key and channel, plus dedup |
 | `webhook_events (provider, provider_message_id)` | Matching events to a notification once it is accepted |
 | `webhook_events (notification_id) WHERE notification_id IS NOT NULL` | Events of one notification, FK checks |
-| `webhook_events (created_at) WHERE notification_id IS NULL` | Re-resolving events that arrived before the accept |
+| `webhook_events (created_at) WHERE notification_id IS NULL` | Re-resolving events that arrived before the accept (the resolver reads the last hour) |
 
 The janitor and sweeper indexes are partial, so they only hold the rows still waiting, not the whole table. They are split by `attempts`: rows with attempts left go to the recovery index, exhausted rows to the sweeper. The recovery index is on `COALESCE(claimed_at, created_at)`, the time a row last had a chance to finish, so one index serves both halves of the claim condition and the query must use the same expression. The two indexes migration 0001 created for the first janitor design matched none of these rules, and every insert and state change of a pending row still paid to maintain them, so migration 0004 dropped them. Until the Phase 6 migration (0005, which adds `attempts` and creates the two indexes above) the table has no janitor indexes, and no janitor query exists yet. The Phase 6 tests include an `EXPLAIN` check that the claim and sweep queries use these indexes (an index scan, not a sequential scan, on a table large enough for the planner to prefer it), so a changed condition cannot silently lose its index.
 
@@ -269,4 +312,4 @@ The janitor and sweeper indexes are partial, so they only hold the rows still wa
 - **Time budget:** `SENDER_SEND_TIMEOUT` (default 4.5 s) is the deadline for the whole chain, set so a healthy first attempt plus one failover fits the 5 s SLO, and each provider call also has its own timeout, so a slow provider cannot use the whole budget when its timeout is shorter. The defaults (2 s + 0.5 s status + 2 s) fill the budget exactly; `New` logs a warning per channel when the timeouts and status checks add up to more than the deadline, and then a slow provider leaves the next one no time (that provider is skipped as "no time left"). The status check runs under its own timeout even after the send deadline has passed.
 - **Rows left pending:** when some provider was never tried and none timed out, `send` writes no outcome, records the last provider it actually called in `last_provider` (nothing if none was called), and logs a warning. Until the Phase 6 janitor exists such a row simply waits, as one whose outcome write failed does; once it exists, its attempt limit of 3 and the sweeper bound the retries, so open breakers cannot cause an endless loop.
 - **Attempts are logged, not stored:** every attempt writes a structured log line (attempt number, provider, outcome kind, duration, error) next to the notification id, idempotency key and channel. A failed attempt logs at warn; a successful one logs at debug, because it is the common case on a hot path, and which provider accepted is in the row's `provider` column. Only the final state reaches Postgres, so there is no attempts table and no schema change. The earlier wording "every attempt's outcome is written to `notifications`" meant the outcome of the chain.
-- **Mock provider:** `internal/adapters/mock` can accept, fail with a chosen error, delay (ending with the caller's context, as `ports.ErrTimeout`), answer with a rate limit, follow a script of per-call steps, take a message and lose the reply (`Took`), answer status checks (or error, or be wrapped to have none), and report a failure webhook after accepting (`WithLateFailure`, consumed by the Phase 5 receiver). It echoes the idempotency key and message id in those events.
+- **Mock provider:** `internal/adapters/mock` can accept, fail with a chosen error, delay (ending with the caller's context, as `ports.ErrTimeout`), answer with a rate limit, follow a script of per-call steps, take a message and lose the reply (`Took`), answer status checks (or error, or be wrapped to have none), and report a webhook after accepting (`WithLateFailure`, `WithLateDelivery`). Events carry a unique `EventID`, the idempotency key and the message id, and `Event.JSON()` is the body a provider would POST to the endpoint. Message and event ids carry a random part chosen when the provider is built, since the database keeps one row per `(provider, message id)` and one event per `(provider, event id)`, and a restarted mock must not reuse them.
