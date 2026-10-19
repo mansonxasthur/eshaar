@@ -44,6 +44,7 @@ Hexagonal. Import direction is enforced by convention, so check it in review:
 - `internal/adapters`: Kafka, Postgres, mock provider, HTTP. Import ports and the domain, never each other.
 - `cmd/{dispatcher,sender,webhook,janitor}`: the only places that wire adapters to ports. Each is a separate process. `cmd/internal/wiring` holds wiring shared by more than one of them (the providers file); only `cmd/*` imports it.
 - `cmd/migrate`: one-shot tool (`make migrate`) that applies the Postgres migrations and exits; it is not part of the runtime flow.
+- `cmd/loadtest`: the load generator (`make loadtest`); it talks to the dispatcher over HTTP only and its production code imports no project package (its tests use the domain's `Request` to check the bodies it builds). `make stack-up` runs the five processes from `infra/Dockerfile`; `infra/provider-failure.sh` runs the provider-failure scenarios. Results are in `docs/load_test.md`, endpoints in `docs/api.md`, the design in `docs/solution.md`.
 - `internal/platform`: cross-cutting helpers (logging, later config).
 
 Runtime flow (spans several of the entry points):
@@ -58,6 +59,7 @@ Notification states: `pending`, `accepted`, `delivered`, `failed`, `unresolved`;
 
 ## Conventions
 
+- A provider entry in `infra/providers.yaml` can carry `mock: {latency, error_rate}` to make the mock slow or flaky; it is for load tests and must stay at its defaults elsewhere.
 - Observability is `log/slog` only: JSON to stdout (info and below) and stderr (warn and above) via `internal/platform/logging`. Build the logger once in `main` and pass it down; no global loggers (`sloglint` enforces `no-global`).
 - Infra is docker-compose, not Kubernetes. Docker and infra files live in `infra/`.
 - Arabic text is UTF-8 end to end; do not transliterate or escape it.

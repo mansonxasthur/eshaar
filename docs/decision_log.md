@@ -154,7 +154,7 @@ The design keeps save-before-send, because a send that succeeds without a saved 
 - **Dispatcher and Kafka:** the dispatcher runs as many instances behind a load balancer, the producer batches and compresses, and the partition count is set high enough for the consumer group.
 - **Janitor under load:** a healthy row can wait longer than 10 seconds in the bounded send pool when the pool is saturated, and recovery would then send it again. The 10-second window is a decision, not a proof: the status check before each re-drive removes the duplicate for providers that can answer, and the attempt limit bounds the rest. An in-flight marker was rejected because it adds a write per notification. Partial indexes on pending rows keep the janitor queries fast.
 - **Kafka lag:** the sends run in goroutines off the consume loop, so lag is not expected. That holds while pool slots divided by send latency stays above the arrival rate. The loop still stops reading when the pool is full, so pool saturation and consumer lag are the signals to watch, and the janitors cannot see lag at all because those messages have no row yet.
-- **Load test:** the machine cannot reach 500K/s, so the test runs scaled down, measures per-instance throughput and where it saturates, and extrapolates. Instances needed = 500K divided by the per-instance rate.
+- **Load test:** the machine cannot reach 500K/s, so the test runs scaled down, measures per-instance throughput and where it saturates, and extrapolates. Instances needed = 500K divided by the per-instance rate. Result: Postgres saturates first, because `MarkAccepted` commits once per row; see Load test below and `docs/load_test.md`.
 
 ## Webhooks
 
@@ -227,16 +227,9 @@ Out of scope:
 - Request permissions beyond API key validation.
 - Real provider integrations.
 
-## Reserved for the solution document and interview
+## Answered in the solution document
 
-These topics are deliberately deferred and will be covered in the solution document or discussed in the interview.
-
-- **Table write rate:** at 500K req/s, each notification means at least an insert plus one or two state updates, so roughly 1M or more writes per second. This drives storage choice and partitioning.
-- **Kafka:** partitioning, consumer scaling, and what happens when the sender falls behind. The code has the base setup, and the document proposes how to scale it.
-- **Timeout fallback trade-off:** the possible duplicate when provider A cannot report status.
-- **Load test results** and system behavior when a provider fails.
-- **PII:** contact details are stored per channel row, which is acceptable here but worth a note.
-- **Alternatives:** how the problem could be solved differently or better with more time or resources.
+The topics once held back for the solution document are covered in `docs/solution.md`: the table write rate and Kafka scaling (section 7), the timeout fallback duplicate (section 4), load test results and provider failure behavior (section 6, with the data in `docs/load_test.md`), PII (section 8) and alternatives (section 9).
 
 ## Configuration
 

@@ -30,15 +30,17 @@ func TestPercentileUsesNearestRank(t *testing.T) {
 
 func TestSummarizeCountsEachStatus(t *testing.T) {
 	ms := time.Millisecond
-	rs := []result{{ms, 202}, {ms, 202}, {ms, 429}, {ms, 503}, {ms, 0}, {ms, 400}}
-	r := summarize(100, rs, 7, 2*time.Second)
-	if r.Accepted != 2 || r.RateLimited != 1 || r.Unavailable != 1 || r.Failed != 2 || r.Behind != 7 || r.Sent != 6 {
+	end := time.Now()
+	early, late := end.Add(-ms), end.Add(ms)
+	rs := []result{{ms, 202, early}, {ms, 202, early}, {ms, 202, late}, {ms, 429, early}, {ms, 503, early}, {ms, 0, early}, {ms, 400, early}}
+	r := summarize(100, rs, 7, 2*time.Second, end)
+	if r.Accepted != 3 || r.RateLimited != 1 || r.Unavailable != 1 || r.Failed != 2 || r.Behind != 7 || r.Sent != 7 {
 		t.Errorf("report = %+v", r)
 	}
 	if r.P99Ms != 1 { // the request with no answer is not a latency sample
 		t.Errorf("p99 = %v", r.P99Ms)
 	}
-	if r.AchievedRPS != 1 {
+	if r.AchievedRPS != 1 { // the answer that came after the window is not in the rate
 		t.Errorf("achieved = %v, want 1", r.AchievedRPS)
 	}
 }

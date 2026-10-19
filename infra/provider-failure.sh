@@ -34,6 +34,7 @@ out=$(make --no-print-directory loadtest LOADTEST_ARGS="-rates $RATE -step $DURA
 echo "$out"
 run=$(echo "$out" | sed -n 's/^run \([0-9a-f]*\) .*/\1/p')
 sent=$(echo "$out" | tail -1 | awk '{print $3}')
+[ -n "$run" ] || { echo "could not read the run id from the load test output" >&2; exit 1; }
 
 start=$(date +%s)
 pending=$($psql "select count(*) from notifications where idempotency_key like '$run-%' and state = 'pending'")

@@ -10,6 +10,7 @@ import (
 type result struct {
 	latency time.Duration
 	status  int // HTTP status, or 0 when the request failed before an answer
+	done    time.Time
 }
 
 // stepReport summarizes one rate step.
@@ -27,15 +28,21 @@ type stepReport struct {
 	P99Ms       float64 `json:"p99_ms"`
 }
 
-// summarize turns the results of one step into a report. elapsed is the wall
-// time of the step; behind counts the requests the generator could not start.
-func summarize(target int, results []result, behind int, elapsed time.Duration) stepReport {
+// summarize turns the results of one step into a report. elapsed is the window
+// in which requests were offered and end its closing time: only answers that
+// came in by end count towards the accepted rate. behind counts the requests
+// the generator could not start.
+func summarize(target int, results []result, behind int, elapsed time.Duration, end time.Time) stepReport {
 	r := stepReport{TargetRPS: target, Sent: len(results), Behind: behind}
 	lat := make([]time.Duration, 0, len(results))
+	inWindow := 0
 	for _, res := range results {
 		switch {
 		case res.status == 202:
 			r.Accepted++
+			if !res.done.After(end) {
+				inWindow++
+			}
 		case res.status == 429:
 			r.RateLimited++
 		case res.status >= 500:
@@ -48,7 +55,7 @@ func summarize(target int, results []result, behind int, elapsed time.Duration) 
 		}
 	}
 	if elapsed > 0 {
-		r.AchievedRPS = float64(r.Accepted) / elapsed.Seconds()
+		r.AchievedRPS = float64(inWindow) / elapsed.Seconds()
 	}
 	r.P50Ms = percentile(lat, 0.50)
 	r.P95Ms = percentile(lat, 0.95)

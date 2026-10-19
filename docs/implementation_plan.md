@@ -118,16 +118,18 @@ The goal is to prove the behavior under load and package everything for review.
 - Write the solution document using the Decision Log as the base.
 - Add the link to the AI agent conversation, which the assignment treats as a key deliverable.
 
+**Status: done except the conversation link.** Run `make stack-up`, then `make loadtest`; the results are in `docs/load_test.md`, the endpoints in `docs/api.md` and the solution document in `docs/solution.md`. The conversation link is a `TODO` at the top of the solution document, because only the author can share the session. Decisions are in the decision log under Load test.
+
 ## Testing and delivery checklist
 
 Every phase ships with unit tests and end-to-end tests before the next phase starts. The reviewers read the code and do not run it, so the code and the document must explain every decision on their own.
 
-- [ ] Source code in a Git repository, readable, with meaningful tests
-- [ ] Documented endpoints
-- [ ] Clear module boundaries and low coupling
-- [ ] Architecture diagram showing components and message flow
-- [ ] Main trade-offs and why each was chosen
-- [ ] Main difficulties and how they were solved
-- [ ] Load test results and behavior when a provider fails
-- [ ] Ideas for a different or better solution with more time or resources
+- [x] Source code in a Git repository, readable, with meaningful tests
+- [x] Documented endpoints
+- [x] Clear module boundaries and low coupling
+- [x] Architecture diagram showing components and message flow
+- [x] Main trade-offs and why each was chosen
+- [x] Main difficulties and how they were solved
+- [x] Load test results and behavior when a provider fails
+- [x] Ideas for a different or better solution with more time or resources
 - [ ] Link to the AI agent conversation

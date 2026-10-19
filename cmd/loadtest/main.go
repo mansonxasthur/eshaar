@@ -179,9 +179,10 @@ loop:
 	// The rate is over the window in which requests were offered; waiting for
 	// the last answers must not count against it.
 	window := time.Since(start)
+	end := start.Add(window)
 	close(jobs)
 	wg.Wait()
-	return summarize(rate, results, behind, window)
+	return summarize(rate, results, behind, window, end)
 }
 
 // one sends request seq. ok is false when there is no sample to count: the
@@ -200,11 +201,11 @@ func (g *generator) one(ctx context.Context, seq int64) (res result, ok bool) {
 	t := time.Now()
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return result{latency: time.Since(t)}, ctx.Err() == nil
+		return result{latency: time.Since(t), done: time.Now()}, ctx.Err() == nil
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
-	return result{latency: time.Since(t), status: resp.StatusCode}, true
+	return result{latency: time.Since(t), status: resp.StatusCode, done: time.Now()}, true
 }
 
 func splitList(s string) []string {
