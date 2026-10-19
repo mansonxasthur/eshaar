@@ -16,6 +16,8 @@ Issue: [#5 Phase 2: Dispatcher](https://github.com/mansonxasthur/eshaar/issues/5
 | 4 | Handler, server, config, `cmd/dispatcher` wiring |
 | 5 | End-to-end tests, decision log, this log; `Closes #5` |
 
+4. **PR review.** Opened PR #6 (`verify` green). Two review comments from the author: set `publishTimeout` to 1 second, and use `errors.AsType` instead of `errors.As`. Both applied in `10f9aac`. `/code-review` warned that 1 second can return `503` on a slow broker or leader election; kept as requested, since the sender dedupes retries. Revisit from the load test results.
+
 ## Review findings acted on
 
 - **Domain:** idempotency key whitespace and length limit; `variables: null` allowed; unknown block keys rejected; stricter test assertions.
@@ -37,3 +39,7 @@ Issue: [#5 Phase 2: Dispatcher](https://github.com/mansonxasthur/eshaar/issues/5
 
 - `make verify` passes (fmt, vet, golangci-lint, `-race` tests).
 - Kafka tests run against a real broker (`confluentinc/confluent-local`): the adapter test and the end-to-end test from HTTP request to a keyed message on the topic, with Arabic text intact, plus a 503 case with no broker.
+
+## State at end of session
+
+Five commits plus `10f9aac` on `phase-2-dispatcher`, pushed. PR #6 linked to #5, review conversations resolved, squash-merged into `main` (`a467f06`).

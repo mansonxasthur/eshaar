@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validRequest() Request {
@@ -89,8 +90,8 @@ func TestRequestValidate(t *testing.T) {
 				}
 				return
 			}
-			var ve *ValidationError
-			if !errors.As(err, &ve) {
+			ve, ok := errors.AsType[*ValidationError](err)
+			if !ok {
 				t.Fatalf("Validate() = %v, want *ValidationError", err)
 			}
 			got := map[string]int{}
@@ -120,5 +121,51 @@ func TestRequestJSONKeepsArabic(t *testing.T) {
 	}
 	if got := string(back.Content[ChannelSMS]); got != `{"text":"مباراة الهلال والنصر تبدأ الساعة 8 مساءً"}` {
 		t.Errorf("sms block changed: %s", got)
+	}
+}
+
+func TestRequestNotifications(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	req := validRequest()
+	got := req.Notifications(now)
+
+	if len(got) != 3 {
+		t.Fatalf("got %d notifications, want 3", len(got))
+	}
+	wantOrder := []Channel{ChannelEmail, ChannelSMS, ChannelWhatsApp}
+	for i, n := range got {
+		if n.Channel != wantOrder[i] {
+			t.Errorf("notification %d channel = %s, want %s", i, n.Channel, wantOrder[i])
+		}
+		if n.IdempotencyKey != "k1" || n.RecipientID != "u1" || n.NotificationType != "match_started" {
+			t.Errorf("%s: request fields not copied: %+v", n.Channel, n)
+		}
+		if n.State != StatePending || !n.CreatedAt.Equal(now) || !n.UpdatedAt.Equal(now) {
+			t.Errorf("%s: want pending at %v, got %s created %v", n.Channel, now, n.State, n.CreatedAt)
+		}
+		if string(n.Content) != string(req.Content[n.Channel]) {
+			t.Errorf("%s: content = %s, want only its own block %s", n.Channel, n.Content, req.Content[n.Channel])
+		}
+	}
+	if got[0].Email == nil || *got[0].Email != req.Email || got[0].Phone != nil {
+		t.Errorf("email row contact fields wrong: %+v", got[0])
+	}
+	for _, n := range got[1:] {
+		if n.Phone == nil || *n.Phone != req.Phone || n.Email != nil {
+			t.Errorf("%s row contact fields wrong: %+v", n.Channel, n)
+		}
+	}
+	if !strings.Contains(string(got[1].Content), "مباراة الهلال والنصر") {
+		t.Errorf("Arabic text not kept as UTF-8: %s", got[1].Content)
+	}
+}
+
+func TestRequestNotificationsSingleChannel(t *testing.T) {
+	req := validRequest()
+	delete(req.Content, ChannelEmail)
+	delete(req.Content, ChannelWhatsApp)
+	got := req.Notifications(time.Now())
+	if len(got) != 1 || got[0].Channel != ChannelSMS {
+		t.Fatalf("got %+v, want one sms notification", got)
 	}
 }
