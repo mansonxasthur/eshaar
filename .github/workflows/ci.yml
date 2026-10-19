@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Only supersede PR runs; every commit on main keeps its own verification.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The required status check for merging to main. It runs the same gate as the
+  # pre-commit hook; the migration tests start Postgres through the runner's Docker.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+          install-only: true # make verify does the linting
+      - name: Verify
+        run: make verify

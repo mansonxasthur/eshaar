@@ -22,7 +22,14 @@ go test -race -run TestName ./internal/platform/logging   # single test
 
 ## Workflow
 
-- Each phase in `docs/implementation_plan.md` starts with a GitHub issue (create it with `gh issue create` before writing code). Drive the phase from that issue: keep its checklist current, reference it in commits and PRs (`Refs #N` / `Closes #N`), and close it when the phase's tests pass.
+- Each phase in `docs/implementation_plan.md` starts with a GitHub issue (create it with `gh issue create` before writing code). Drive the phase from that issue: keep its checklist current, reference it in commits and PRs (`Refs #N` / `Closes #N`), and let the PR's `Closes #N` close it on merge once the phase's tests pass.
+- Every issue gets its own branch and its own PR. Branch from `main`, never commit to `main` directly, and put `Closes #N` in the PR so merging closes the issue. Do not close the issue by hand.
+- A PR is eligible to merge into `main` only when all of these hold:
+  - the `verify` check of `.github/workflows/ci.yml` (`make verify` on the PR) is green;
+  - the branch is up to date with `main`;
+  - the PR is linked to its issue and the template checklist is complete;
+  - at least one approving review, and all review conversations are resolved. GitHub does not count an author's own approval, so a solo maintainer merges their own PR as admin (admins are not enforced) after `verify` is green and the checklist is complete.
+  `main` is protected to match: required `verify` check, branch up to date, one approval, conversations resolved, no force pushes or deletion. Merge with squash, so `main` keeps one commit per PR, and delete the branch afterwards.
 - Before each commit, run Claude's `/code-review` on the pending changes and address its findings (or state why one is skipped) before committing. This comes in addition to `make verify`, not instead of it.
 
 ## Architecture
