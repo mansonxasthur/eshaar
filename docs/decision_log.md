@@ -10,7 +10,7 @@ The stack is Go, Postgres and Kafka, organized as a hexagonal architecture.
 
 - One request carries one notification for one user.
 - Peak load is 500K req/s, reached when a scheduled event fires.
-- Delivery target is under 5 seconds from send to delivery.
+- Delivery target: 5 seconds is an SLO for the first successful attempt, including failover to the next provider after a transient error. Provider timeouts are bounded by the provider and sit outside it, so the SLO can be exceeded in those cases, and the janitors recover what it misses. `SENDER_SEND_TIMEOUT` caps one chain of attempts; it is not a delivery guarantee.
 - Providers are simulated by a mock that can succeed, fail, delay, or accept a message and later report failure by webhook.
 - Opt-ins, user preferences and send limits belong to the upstream service that calls us, and are out of scope here.
 
@@ -79,6 +79,7 @@ There is one `notifications` row per channel, keyed by the idempotency key plus 
 | provider\_message\_id | Nullable, set when a provider accepts |
 | accepted\_at | Nullable |
 | claimed\_at | Nullable, set when the recovery janitor claims the row |
+| attempts | Recovery attempts by the janitor, starts at 0 and caps at 3. The sender's first send is not counted. Added by the Phase 6 migration |
 | created\_at | Set on insert, also the first-attempt marker |
 | updated\_at | General last-change time |
 
@@ -119,15 +120,17 @@ Two janitors recover rows that stall after the sender acknowledges Kafka, and ea
 ### Janitor 1: recovery
 
 - Runs every 5 seconds.
-- Claims a batch of rows where `state = pending`, `claimed_at` is null, and `created_at` is older than the recovery threshold of 30 seconds.
-- The claim is a single atomic statement that sets `claimed_at = now`, so concurrent janitors never take the same rows.
-- Re-drives each claimed row once per channel, reusing the same idempotency key.
+- Claims a batch of rows where `state = pending`, `attempts < 3`, and either `claimed_at` is null and `created_at` is older than 10 seconds, or `claimed_at` is older than 10 seconds. Both halves mean "no outcome in the 10 seconds since the row was created or last claimed", which is `COALESCE(claimed_at, created_at) < now() - 10 seconds`. A row just inserted, and still waiting in its sender's pool, is left alone for 10 seconds.
+- The claim is a single atomic statement that sets `claimed_at = now` and `attempts = attempts + 1`, so concurrent janitors never take the same rows.
+- Re-drives each claimed row with the same idempotency key. Before sending it asks every provider in the channel's chain that supports a status check whether it already took the key. If one did, the row is accepted with that provider and message id and nothing is sent. Otherwise the normal fallback chain runs and writes the outcome, guarded by `state = pending`, so a row the original sender finished in the meantime is not overwritten.
+- The attempt limit (3), the stale age (10 seconds) and the tick are settings.
 
 ### Janitor 2: sweeper
 
-- Runs every minute.
-- Marks a row `unresolved` if it is still `pending` and its `claimed_at` is more than 10 seconds old.
-- Because it runs once a minute, 10 seconds is the earliest a row can be marked, not the typical time.
+- Runs every 10 minutes.
+- Marks a row `unresolved` if it is still `pending`, has used all its attempts (`attempts >= 3`), and its `claimed_at` is more than 10 seconds old, so the last attempt has had its chance. It sets `failure_reason` (for example "no outcome after 3 recovery attempts").
+- A stalled row therefore takes at most 3 x (10 seconds + the 5-second tick) to exhaust its attempts, then up to 10 minutes for the next sweep: about 10 minutes 45 seconds in the worst case. The sweeper is the final backstop, not a latency bound.
+- A row can still be re-driven while its original send is in flight, if it waited longer than 10 seconds in a saturated pool. The status check narrows that for providers that can answer, and a pool backlog that long is itself the signal to add capacity.
 
 ### Idempotency
 
@@ -148,7 +151,8 @@ The design keeps save-before-send, because a send that succeeds without a saved 
 - **Bounded sends:** a bounded pool and an outbound rate limit per provider. When the pool is full the consumer stops reading, so the backlog waits in Kafka.
 - **Webhook ingest:** the endpoint stays thin, validating and then batch-inserting events, with a retention plan for `webhook_events`.
 - **Dispatcher and Kafka:** the dispatcher runs as many instances behind a load balancer, the producer batches and compresses, and the partition count is set high enough for the consumer group.
-- **Janitor under load:** a healthy row can wait longer than 5 seconds in the bounded send pool, and recovery would then send it twice. The recovery threshold is 30 seconds, longer than the worst-case queue wait, and is adjusted from the load test. An in-flight marker was rejected because it adds a write per notification. A partial index on pending rows keeps the janitor query fast.
+- **Janitor under load:** a healthy row can wait longer than 10 seconds in the bounded send pool when the pool is saturated, and recovery would then send it again. The 10-second window is a decision, not a proof: the status check before each re-drive removes the duplicate for providers that can answer, and the attempt limit bounds the rest. An in-flight marker was rejected because it adds a write per notification. Partial indexes on pending rows keep the janitor queries fast.
+- **Kafka lag:** the sends run in goroutines off the consume loop, so lag is not expected. That holds while pool slots divided by send latency stays above the arrival rate. The loop still stops reading when the pool is full, so pool saturation and consumer lag are the signals to watch, and the janitors cannot see lag at all because those messages have no row yet.
 - **Load test:** the machine cannot reach 500K/s, so the test runs scaled down, measures per-instance throughput and where it saturates, and extrapolates. Instances needed = 500K divided by the per-instance rate.
 
 ## Webhooks
@@ -170,7 +174,7 @@ These are the compromises accepted on purpose, and the items left to other servi
 | --- | --- |
 | Fallback to provider B when provider A times out and cannot report status | A notification may be delivered twice |
 | In-memory rate limiter | Limits are per dispatcher instance, not global |
-| Janitor re-drives each row once | Rows that still stall become `unresolved` instead of retrying indefinitely |
+| Janitor re-drives a row up to 3 times, asking the providers first | A provider that cannot report status may still deliver a re-driven row twice; rows that exhaust the attempts wait up to the 10-minute sweeper before they become `unresolved` |
 | Webhooks do not trigger fallback | A provider that accepts and later reports failure leaves the row `failed` |
 | Webhook-to-notification link depends on the provider echoing a reference | Real providers may need a different matching key |
 
@@ -203,22 +207,22 @@ These topics are deliberately deferred and will be covered in the solution docum
 - The migration test starts a real Postgres with testcontainers-go and skips under `-short` or without Docker. It checks both unique constraints, that the same value under another channel or provider is accepted, the CHECK constraints, and a down-then-up round trip.
 - `notifications` also has CHECKs on `channel`, `state`, and on contact fields (email rows need an address and no phone, SMS and WhatsApp rows the reverse), so a malformed row fails at insert.
 - `notifications` gains a nullable `provider` column, set when a provider accepts. Message ids are only unique per provider, so webhook lookup is by `(provider, provider_message_id)`, backed by a unique partial index. An `accepted` row must have `provider`, `provider_message_id` and `accepted_at`.
-- `updated_at` has no trigger; every UPDATE sets it. A per-attempt history table is not part of Phase 1: the log's "every attempt is written to `notifications`" stands until the sender phase shows it is too thin.
+- `updated_at` has no trigger; every UPDATE sets it. There is no per-attempt history table: only the chain's final state is stored, and each attempt is logged (see Providers and fallback).
 - `webhook_events.event_id` stays nullable. Postgres treats NULLs as distinct, so events without an id are never deduplicated by the unique constraint.
 
 ### Indexes
 
 | Index | Serves |
 | --- | --- |
-| `notifications (created_at) WHERE state = 'pending' AND claimed_at IS NULL` | Recovery janitor claim query |
-| `notifications (claimed_at) WHERE state = 'pending' AND claimed_at IS NOT NULL` | Sweeper query |
+| `notifications (COALESCE(claimed_at, created_at)) WHERE state = 'pending' AND attempts < 3` | Recovery janitor claim query |
+| `notifications (claimed_at) WHERE state = 'pending' AND attempts >= 3` | Sweeper query |
 | `notifications (provider, provider_message_id) WHERE provider_message_id IS NOT NULL` unique | Webhook lookup by provider message id |
 | `notifications (idempotency_key, channel)` unique | Webhook lookup by key and channel, plus dedup |
 | `webhook_events (provider, provider_message_id)` | Matching events to a notification once it is accepted |
 | `webhook_events (notification_id) WHERE notification_id IS NOT NULL` | Events of one notification, FK checks |
 | `webhook_events (created_at) WHERE notification_id IS NULL` | Re-resolving events that arrived before the accept |
 
-The janitor and sweeper indexes are partial, so they only hold the rows still waiting, not the whole table. They are split by `claimed_at` because each query filters on one side of it.
+The janitor and sweeper indexes are partial, so they only hold the rows still waiting, not the whole table. They are split by `attempts`: rows with attempts left go to the recovery index, exhausted rows to the sweeper. The recovery index is on `COALESCE(claimed_at, created_at)`, the time a row last had a chance to finish, so one index serves both halves of the claim condition and the query must use the same expression. The Phase 6 migration adds `attempts`, creates these two indexes and drops the two that migration 0001 created.
 
 ## Local environment
 
@@ -241,7 +245,7 @@ The janitor and sweeper indexes are partial, so they only hold the rows still wa
 - **Layers:** `internal/sender` is the service. It imports only the domain and the ports (`Consumer`/`Batch`, `NotificationStore`, `Provider`) and `cmd/sender` wires the Kafka, Postgres and mock adapters to it. The service owns the loop, so insert-then-ack is tested with fakes and no broker.
 - **Order per batch:** poll, split every request into one `pending` row per channel (`Request.Notifications`), insert the whole batch with one statement, ack, then start the sends. If the insert fails the batch is released (the consumer rewinds to the batch's first offsets), nothing is acked, and the next poll returns the same records after a capped exponential backoff.
 - **Insert:** one `INSERT ... SELECT FROM unnest(...) ON CONFLICT ON CONSTRAINT notifications_idempotency_channel_key DO NOTHING RETURNING`, so the statement text does not grow with the batch. The same key twice in one batch inserts once.
-- **Conflicting rows are not sent.** Only the rows this insert created are sent. A row that already exists was saved by an earlier delivery, and that delivery owns its send; if its process died, the Phase 6 janitor re-drives it. Sending conflicting rows would deliver every redelivered message twice. The cost is that a crash between ack and send leaves rows `pending` until the janitor's 30 s threshold. If the ack itself fails, the sender still sends the rows it just saved, since the redelivered batch would not.
+- **Conflicting rows are not sent.** Only the rows this insert created are sent. A row that already exists was saved by an earlier delivery, and that delivery owns its send; if its process died, the Phase 6 janitor re-drives it. Sending conflicting rows would deliver every redelivered message twice. The cost is that a crash between ack and send leaves rows `pending` until the janitor's 10 s window passes. If the ack itself fails, the sender still sends the rows it just saved, since the redelivered batch would not.
 - **Kafka consumer:** franz-go group consumer with auto-commit off and `BlockRebalanceOnPoll`. `Ack` commits the batch's records and lets a rebalance proceed; `Release` rewinds with `SetOffsets`. A new group starts at the beginning of the topic. A record that cannot be decoded is logged (topic, partition, offset, no payload) and skipped, then committed with its batch, so one poison message cannot stall a partition. There is no dead-letter topic.
 - **Bounded pool:** a semaphore of `SENDER_POOL_SIZE` (default 256). The loop blocks on it after the ack, so a full pool stops the next poll and the backlog waits in Kafka. Rebalances are allowed at ack time, so a blocked loop does not hold up the group.
 - **Outbound rate limit:** a token bucket per provider on each channel (`rps` in the providers file, burst equal to the rate rounded up), applied as a decorator around the provider. The wait counts against the send timeout and holds a pool slot, so a throttled provider also backs the loop up into Kafka.
@@ -259,6 +263,6 @@ The janitor and sweeper indexes are partial, so they only hold the rows still wa
 - **Outcome when the chain ends:** `accepted` as above. Otherwise `unresolved` if any attempt timed out, because the message may have been delivered, and `failed` if every attempt was refused outright or never made for lack of time. A rejection plus a timeout is therefore `unresolved`. The reason lists each provider's error. A late webhook can still move `unresolved` to a final state; the sender never does.
 - **Error kinds:** providers wrap `ports.ErrTimeout`, `ErrRateLimited`, `ErrTransient` or `ErrRejected`. A plain deadline counts as a timeout, and any other error as transient. A status check is an optional `ports.StatusChecker` found by type assertion, and the rate-limit and breaker decorators pass it through.
 - **Breaker:** hand-rolled in `internal/sender` (no dependency) with an injectable clock. After `failures` consecutive transient errors or timeouts it fails fast with `ErrCircuitOpen`; after `open_for` it lets one probe through, and a healthy answer closes it while a failure reopens it. A rate limit or rejection counts as a healthy answer, a cancelled context as neither, and a call that started before the breaker changed state cannot move it when it returns.
-- **Time budget:** `SENDER_SEND_TIMEOUT` (default 4.5 s, inside the 5 s target) is the deadline for the whole chain, and each provider call also has its own timeout, so a slow provider cannot use the whole budget when its timeout is shorter. The defaults (2 s + 0.5 s status + 2 s) fill the budget exactly; `New` logs a warning per channel when the timeouts and status checks add up to more than the deadline, and then a slow provider leaves the next one no time (that provider is skipped as "no time left"). The status check runs under its own timeout even after the send deadline has passed.
+- **Time budget:** `SENDER_SEND_TIMEOUT` (default 4.5 s) is the deadline for the whole chain, set so a healthy first attempt plus one failover fits the 5 s SLO, and each provider call also has its own timeout, so a slow provider cannot use the whole budget when its timeout is shorter. The defaults (2 s + 0.5 s status + 2 s) fill the budget exactly; `New` logs a warning per channel when the timeouts and status checks add up to more than the deadline, and then a slow provider leaves the next one no time (that provider is skipped as "no time left"). The status check runs under its own timeout even after the send deadline has passed.
 - **Attempts are logged, not stored:** every attempt writes a structured log line (attempt number, provider, outcome kind, duration, error) next to the notification id, idempotency key and channel. Only the final state reaches Postgres, so there is no attempts table and no schema change. The earlier wording "every attempt's outcome is written to `notifications`" meant the outcome of the chain.
 - **Mock provider:** `internal/adapters/mock` can accept, fail with a chosen error, delay (ending with the caller's context, as `ports.ErrTimeout`), answer with a rate limit, follow a script of per-call steps, take a message and lose the reply (`Took`), answer status checks (or error, or be wrapped to have none), and report a failure webhook after accepting (`WithLateFailure`, consumed by the Phase 5 receiver). It echoes the idempotency key and message id in those events.

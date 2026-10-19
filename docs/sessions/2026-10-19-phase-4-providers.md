@@ -8,6 +8,7 @@ Issue: [#9 Phase 4: Providers and fallback](https://github.com/mansonxasthur/esh
 2. **Issue.** Created #9 with a checklist, then branched `phase-4-providers` from `origin/main`.
 3. **Build, one commit per step.** Each step ran `/code-review` and `make verify` before its commit.
 4. **Course correction.** After the fallback commit the model changed: each channel has its own ordered chain of providers (A, B, maybe C), and every channel/provider cell has its own rate limit, timeout and breaker. The fixed `Pair{A, B}` and the global provider settings were replaced by `[]Route` per channel and a YAML policy table with values from the environment. Status checks now run after every non-final timeout.
+5. **Design decisions for Phase 6 and the SLO** (recorded in the decision log, no code): the 5 s is an SLO for the first successful attempt plus failover on transient errors, and provider timeouts sit outside it; Kafka lag is not expected because sends run off the consume loop, which holds while the pool is not saturated; the recovery janitor picks `pending` rows with `attempts < 3` that had no outcome for 10 s since creation or the last claim, checks provider status before each re-drive, and a sweeper every 10 minutes marks exhausted rows `unresolved` with a reason.
 
 | Step | Content |
 | --- | --- |
