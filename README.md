@@ -182,7 +182,7 @@ sequenceDiagram
             S->>P: row accepted by B
         end
     end
-    Note over S,P: if every provider fails the row is failed;<br/>if a timeout was never settled it is unresolved;<br/>if a breaker stopped the chain it stays pending for the janitor
+    Note over S,P: if every provider fails the row is failed,<br/>if a timeout was never settled it is unresolved,<br/>if a breaker stopped the chain it stays pending for the janitor
 ```
 
 ### 3. Delivery report by webhook
