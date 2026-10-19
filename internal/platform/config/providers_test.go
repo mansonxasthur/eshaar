@@ -176,31 +176,11 @@ func TestParseProvidersReadsWebhookSecret(t *testing.T) {
 	}
 }
 
-func TestParseProvidersRejectsShortWebhookSecret(t *testing.T) {
-	const in = "sms:\n  - {name: a, priority: 1, rps: 1, timeout: 1s, breaker: {failures: 1, open_for: 1s}, webhook_secret: short}\n"
-	if _, err := ParseProviders([]byte(in), env(nil)); err == nil || !strings.Contains(err.Error(), "webhook_secret") {
-		t.Errorf("short secret accepted: %v", err)
-	}
-}
-
 func TestParseProvidersDoesNotEchoUnsafeEnvValue(t *testing.T) {
 	const in = "sms:\n  - {name: a, priority: 1, rps: 1, timeout: 1s, breaker: {failures: 1, open_for: 1s}, webhook_secret: '${A_WEBHOOK_SECRET}'}\n"
 	_, err := ParseProviders([]byte(in), env(map[string]string{"A_WEBHOOK_SECRET": "s3cret/with:chars"}))
 	if err == nil || strings.Contains(err.Error(), "s3cret") || !strings.Contains(err.Error(), "A_WEBHOOK_SECRET") {
 		t.Errorf("error should name the variable and hide the value: %v", err)
-	}
-}
-
-func TestParseProvidersWebhookSecretLengthBoundary(t *testing.T) {
-	const in = "sms:\n  - {name: a, priority: 1, rps: 1, timeout: 1s, breaker: {failures: 1, open_for: 1s}, webhook_secret: '${S}'}\n"
-	for secret, ok := range map[string]bool{"123456789012345": false, "1234567890123456": true} {
-		_, err := ParseProviders([]byte(in), env(map[string]string{"S": secret}))
-		if (err == nil) != ok {
-			t.Errorf("secret of %d characters: err = %v, want accepted = %v", len(secret), err, ok)
-		}
-		if err != nil && strings.Contains(err.Error(), secret) {
-			t.Errorf("error echoes the secret: %v", err)
-		}
 	}
 }
 
@@ -220,5 +200,13 @@ func TestParseProvidersShowsUnsafeValueOfOrdinaryVariable(t *testing.T) {
 	_, err := ParseProviders([]byte(in), env(map[string]string{"R": "10/s"}))
 	if err == nil || !strings.Contains(err.Error(), "10/s") {
 		t.Errorf("error should show the bad value: %v", err)
+	}
+}
+
+func TestShownHidesCredentialNames(t *testing.T) {
+	for _, name := range []string{"SMS_A_WEBHOOK_SECRET", "API_KEY", "auth_token", "DB_PASSWORD"} {
+		if got := shown(name, "s3cr3t/x"); strings.Contains(got, "s3cr3t") {
+			t.Errorf("%s: value shown: %s", name, got)
+		}
 	}
 }

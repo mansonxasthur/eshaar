@@ -34,9 +34,10 @@ type Provider struct {
 	Breaker  Breaker       `yaml:"breaker"`
 
 	// WebhookSecret is the key the provider signs its webhooks with. It is
-	// optional: only cmd/webhook reads it, and a provider without one cannot
-	// deliver webhooks. Being set through a placeholder, it can only hold
-	// letters, digits and . _ + - (hex is a good choice).
+	// optional: only cmd/webhook uses it (and checks its length), and a
+	// provider without one cannot deliver webhooks. Being set through a
+	// placeholder, it can only hold letters, digits and . _ + - (hex is a good
+	// choice).
 	WebhookSecret Secret `yaml:"webhook_secret"`
 }
 
@@ -99,10 +100,6 @@ var safeValue = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 // field, like 2 for two seconds, would otherwise be read as 2 nanoseconds.
 const minDuration = time.Millisecond
 
-// minWebhookSecret is the shortest webhook secret accepted, so a placeholder
-// value like "x" cannot pass for a key.
-const minWebhookSecret = 16
-
 // ParseProviders parses the providers YAML. Values come from the environment
 // through ${NAME} or ${NAME:-default} placeholders, which are replaced before
 // the YAML is read, so they work anywhere a value does (and in comments, so
@@ -150,11 +147,16 @@ func ParseProviders(data []byte, getenv func(string) string) (Providers, error) 
 	return p, nil
 }
 
-// shown quotes an environment value for an error message, or hides it when the
-// variable's name says it holds a secret.
+// shown quotes an environment value for an error message. A variable whose
+// name says it holds a credential (SECRET, KEY, TOKEN or PASS in the name) is
+// not echoed, since errors reach the logs. Other values are, so a bad rps or
+// timeout can be diagnosed; name a credential variable accordingly.
 func shown(name, value string) string {
-	if strings.Contains(strings.ToUpper(name), "SECRET") {
-		return "the value (not shown, it is a secret)"
+	upper := strings.ToUpper(name)
+	for _, w := range []string{"SECRET", "KEY", "TOKEN", "PASS"} {
+		if strings.Contains(upper, w) {
+			return "the value (not shown, the name says it is a credential)"
+		}
 	}
 	return fmt.Sprintf("%q", value)
 }
@@ -203,9 +205,6 @@ func (p Providers) validate() error {
 			}
 			if pr.Breaker.Failures < 1 {
 				errs = append(errs, fmt.Errorf("%s: breaker.failures must be at least 1", at))
-			}
-			if pr.WebhookSecret != "" && len(pr.WebhookSecret) < minWebhookSecret {
-				errs = append(errs, fmt.Errorf("%s: webhook_secret must be at least %d characters", at, minWebhookSecret))
 			}
 			if pr.Breaker.OpenFor < minDuration {
 				errs = append(errs, fmt.Errorf("%s: breaker.open_for must be a duration of at least 1ms, with a unit such as 30s", at))
