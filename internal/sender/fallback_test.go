@@ -193,7 +193,10 @@ func TestFallbackNothingAcceptedOutcomes(t *testing.T) {
 		{"timeout then rejected", errTimeout, errRejected, domain.StateUnresolved},
 		{"both rejected", errRejected, errRejected, domain.StateFailed},
 		{"both rate limited", errRateLimit, errRateLimit, domain.StateFailed},
-		{"both down", errDown, ErrCircuitOpen, domain.StateFailed},
+		{"both down", errDown, errDown, domain.StateFailed},
+		{"transient then open breaker", errDown, ErrCircuitOpen, domain.StatePending},
+		{"rejected then open breaker", errRejected, ErrCircuitOpen, domain.StatePending},
+		{"both breakers open", ErrCircuitOpen, ErrCircuitOpen, domain.StatePending},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -252,7 +255,7 @@ func TestFallbackOverallDeadlineLeavesNoTimeForB(t *testing.T) {
 	}
 }
 
-func TestFallbackRejectedThenNoTimeIsFailed(t *testing.T) {
+func TestFallbackRejectedThenNoTimeStaysPending(t *testing.T) {
 	cfg := fallbackConfig()
 	cfg.SendTimeout = 30 * time.Millisecond
 	a := &stub{name: "a", send: func(ctx context.Context, _ domain.Notification) (string, error) {
@@ -261,7 +264,7 @@ func TestFallbackRejectedThenNoTimeIsFailed(t *testing.T) {
 	}}
 	b := &stub{name: "b", send: accepts("b-1")}
 	out := deliver(cfg, chain(a, b))
-	if out.state != domain.StateFailed || b.calls.Load() != 0 {
+	if out.state != domain.StatePending || b.calls.Load() != 0 {
 		t.Errorf("outcome = %+v, B calls %d", out, b.calls.Load())
 	}
 }

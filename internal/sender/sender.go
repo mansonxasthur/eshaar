@@ -165,15 +165,22 @@ func (s *Sender) send(ctx context.Context, n domain.Notification) {
 	log := s.log.With("notification_id", n.ID, "idempotency_key", n.IdempotencyKey, "channel", n.Channel)
 
 	out := s.deliver(base, log, n, s.providers[n.Channel])
-	s.record(base, log, func(ctx context.Context) error {
-		switch out.state {
-		case domain.StateAccepted:
-			return s.store.MarkAccepted(ctx, n.ID, out.provider, out.messageID)
-		case domain.StateUnresolved:
-			return s.store.MarkUnresolved(ctx, n.ID, failureReason(out.reason))
-		}
-		return s.store.MarkFailed(ctx, n.ID, failureReason(out.reason))
-	})
+	var write func(context.Context) error
+	switch out.state {
+	case domain.StateAccepted:
+		write = func(ctx context.Context) error { return s.store.MarkAccepted(ctx, n.ID, out.provider, out.messageID) }
+	case domain.StateUnresolved:
+		write = func(ctx context.Context) error { return s.store.MarkUnresolved(ctx, n.ID, failureReason(out.reason)) }
+	case domain.StateFailed:
+		write = func(ctx context.Context) error { return s.store.MarkFailed(ctx, n.ID, failureReason(out.reason)) }
+	default:
+		// Pending: no provider was tried, so there is nothing to record and
+		// the row stays pending for the janitor. Any other state is a bug and
+		// is treated the same way, never as a failure.
+		log.WarnContext(ctx, "no outcome to record; row stays pending for the janitor", "state", out.state, "reason", out.reason)
+		return
+	}
+	s.record(base, log, write)
 }
 
 // maxReasonLen caps the stored failure reason.

@@ -49,7 +49,7 @@ func kindOf(err error) kind {
 
 // outcome is what a channel send ends in.
 type outcome struct {
-	state     domain.State // accepted, failed or unresolved
+	state     domain.State // accepted, failed or unresolved; pending means write nothing
 	provider  string       // accepted only
 	messageID string       // accepted only
 	reason    string       // failed and unresolved
@@ -67,8 +67,12 @@ type outcome struct {
 //     is not asked: there is nowhere left to switch to.
 //   - Nothing accepted and some attempt timed out: unresolved, because the
 //     message may have been delivered.
-//   - Nothing accepted and every attempt was refused outright, or never made
-//     for lack of time: failed.
+//   - Nothing accepted, no timeout, but some provider was never tried (its
+//     breaker was open or the deadline had passed): no outcome, and the row stays
+//     pending so the janitor re-drives it. Marking it failed would lose a
+//     message that nothing was ever sent for.
+//   - Nothing accepted and every provider was tried and refused it outright:
+//     failed.
 //
 // The whole flow runs under SendTimeout; each provider call also has its own
 // timeout from its route.
@@ -85,12 +89,13 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 	defer cancel()
 
 	var reasons []string
-	uncertain := false
+	uncertain, skipped := false, false
 	for i, route := range chain {
 		name := route.Provider.Name()
 		if ctx.Err() != nil {
 			log.WarnContext(ctx, "no time left for provider", "attempt", i+1, "provider", name)
 			reasons = append(reasons, name+": no time left")
+			skipped = true
 			continue
 		}
 		id, err := s.attempt(ctx, log, n, i+1, route)
@@ -98,6 +103,9 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 			return outcome{state: domain.StateAccepted, provider: name, messageID: id}
 		}
 		reasons = append(reasons, fmt.Sprintf("%s: %v", name, err))
+		if errors.Is(err, ErrCircuitOpen) {
+			skipped = true // nothing reached the provider
+		}
 
 		if kindOf(err) != kindTimeout {
 			continue
@@ -111,8 +119,11 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 	}
 
 	reason := strings.Join(reasons, "; ")
-	if uncertain {
+	switch {
+	case uncertain:
 		return outcome{state: domain.StateUnresolved, reason: reason}
+	case skipped:
+		return outcome{state: domain.StatePending, reason: reason}
 	}
 	return outcome{state: domain.StateFailed, reason: reason}
 }
@@ -125,7 +136,8 @@ func (s *Sender) attempt(ctx context.Context, log *slog.Logger, n domain.Notific
 	id, err := route.Provider.Send(callCtx, n)
 
 	k := kindOf(err)
-	level := slog.LevelInfo
+	// A success is the common case on a hot path, so it is only a debug line.
+	level := slog.LevelDebug
 	if err != nil {
 		level = slog.LevelWarn
 	}

@@ -70,7 +70,7 @@ The goal is a mock provider and the fallback logic from provider A to provider B
 - On a timeout, make one final status check against that provider with the idempotency key if it supports it, then switch to the next. If it cannot check, switch anyway.
 - On a rate-limit response, switch to the next provider without retrying.
 - Wrap each provider in a circuit breaker for transient errors and timeouts only.
-- Save the outcome when the chain ends: `accepted` with `provider_message_id`, `unresolved` if nothing accepted and a provider timed out, or `failed` if every provider refused. Log every attempt.
+- Save the outcome when the chain ends: `accepted` with `provider_message_id`, `unresolved` if nothing accepted and a provider timed out, or `failed` if every provider was tried and refused. A row where no provider was tried (open breakers, no time left) stays `pending` for the janitor. Log every attempt.
 
 **Tests:** unit tests for each fallback branch (failure, timeout with a positive status check, timeout with no check, rate limit, both timing out, a chain of three) and for the circuit breaker opening and closing, plus an end-to-end test of the outcomes reaching the rows.
 

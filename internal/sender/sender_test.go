@@ -442,3 +442,18 @@ func TestProviderPanicLeavesRowPending(t *testing.T) {
 		t.Error("a panicking send was recorded")
 	}
 }
+
+// When no provider was tried the row must stay pending, not be written failed.
+func TestNoProviderTriedLeavesRowPending(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.provider.send = func(context.Context, domain.Notification) (string, error) { return "", ErrCircuitOpen }
+	h.sender.send(context.Background(), domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS})
+	if h.rec.count("send:k1") != 1 {
+		t.Fatal("the provider was not called")
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if len(h.store.accepted)+len(h.store.failed)+len(h.store.unresolved) != 0 {
+		t.Error("a send that never reached a provider was recorded")
+	}
+}

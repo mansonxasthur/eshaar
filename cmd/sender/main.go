@@ -31,6 +31,11 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// PROVIDER_RATE_LIMIT_RPS was replaced by the rps of each provider in the
+	// providers file; a leftover value would otherwise be ignored without a word.
+	if os.Getenv("PROVIDER_RATE_LIMIT_RPS") != "" {
+		log.Warn("PROVIDER_RATE_LIMIT_RPS is no longer used; set rps per provider in the providers file", "file", cfg.ProvidersFile)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	specs, err := config.LoadProviders(cfg.ProvidersFile, os.Getenv)
@@ -50,9 +55,11 @@ func senderConfig(cfg config.Config) sender.Config {
 		PoolSize:      cfg.SenderPoolSize,
 		SendTimeout:   cfg.SenderSendTimeout,
 		StatusTimeout: cfg.ProviderStatusTimeout,
-		DrainTimeout:  cfg.SenderSendTimeout + 5*time.Second,
-		MinBackoff:    100 * time.Millisecond,
-		MaxBackoff:    5 * time.Second,
+		// The longest send is the chain deadline, then a status check past it,
+		// then the outcome write (5 s), with some margin.
+		DrainTimeout: cfg.SenderSendTimeout + 10*time.Second,
+		MinBackoff:   100 * time.Millisecond,
+		MaxBackoff:   5 * time.Second,
 	}
 }
 
