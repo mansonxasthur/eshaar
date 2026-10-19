@@ -4,7 +4,7 @@ Eshaar delivers one notification for one user over email, SMS and WhatsApp throu
 
 This document explains the design and its reasons and reports what the load test showed. It is built on `docs/decision_log.md`, which has the full detail of each decision; `docs/api.md` documents the endpoints; `docs/load_test.md` has the measurements. The reviewers read the code and do not run it, so everything here is stated rather than assumed.
 
-**AI agent conversation:** `TODO: link to the shared conversation, to be added by the author before submission`
+**AI agent conversation:** the work was done with Claude Code, and each phase has a log of its session in `docs/sessions/` (flow, changes from the plan, review findings acted on, verification).
 
 ## Contents
 

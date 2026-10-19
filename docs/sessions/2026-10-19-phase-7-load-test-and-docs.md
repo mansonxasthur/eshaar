@@ -40,4 +40,4 @@ Issue: [#15 Phase 7: Load test, API docs and solution document](https://github.c
 
 ## State at end of session
 
-Commits on `phase-7-load-test-and-docs`, to be pushed with a PR that closes #15. Still open: the conversation link in `docs/solution.md`, which only the author can provide.
+Commits on `phase-7-load-test-and-docs`, to be pushed with a PR that closes #15. The AI conversation is recorded by the session logs in `docs/sessions/`, which `docs/solution.md` points to.
