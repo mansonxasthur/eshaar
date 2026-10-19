@@ -31,6 +31,12 @@ const (
 
 	EnvProviderStatusTimeout = "PROVIDER_STATUS_TIMEOUT"
 
+	EnvJanitorInterval    = "JANITOR_INTERVAL"
+	EnvJanitorStaleAfter  = "JANITOR_STALE_AFTER"
+	EnvJanitorBatchSize   = "JANITOR_BATCH_SIZE"
+	EnvJanitorConcurrency = "JANITOR_CONCURRENCY"
+	EnvSweeperInterval    = "SWEEPER_INTERVAL"
+
 	EnvWebhookBatchSize       = "WEBHOOK_BATCH_SIZE"
 	EnvWebhookFlushInterval   = "WEBHOOK_FLUSH_INTERVAL"
 	EnvWebhookFlushers        = "WEBHOOK_FLUSHERS"
@@ -53,6 +59,7 @@ const (
 	NeedAPIKeys // API keys and the per-key rate limit
 	NeedSender  // consumer group, send pool and outbound rate limit
 	NeedWebhook // webhook batching and the providers file (for the secrets)
+	NeedJanitor // recovery and sweeper timing, plus the providers file and send timeouts the re-drive shares with the sender
 )
 
 // Config holds the settings shared by the Eshaar processes.
@@ -70,6 +77,12 @@ type Config struct {
 	SenderPoolSize    int           // concurrent channel sends per sender
 	SenderBatchSize   int           // most records read per poll
 	SenderSendTimeout time.Duration // limit for a whole channel send, across all its providers
+
+	JanitorInterval    time.Duration // time between recovery passes
+	JanitorStaleAfter  time.Duration // age at which a pending row, or its last claim, counts as abandoned
+	JanitorBatchSize   int           // rows claimed (or swept) per statement
+	JanitorConcurrency int           // re-drives in flight at once; at least the batch size, so every claimed row starts at once
+	SweeperInterval    time.Duration // time between sweeper passes
 
 	ProvidersFile         string        // YAML file listing each channel's providers and their policies
 	ProviderStatusTimeout time.Duration // limit for the status check after a provider times out
@@ -110,15 +123,19 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 		}
 		cfg.RateLimitRPS, cfg.RateLimitBurst = rps, burst
 	}
+	var err error
 	if need&NeedSender != 0 {
 		cfg.KafkaGroupID = valueOr(getenv(EnvKafkaGroupID), "eshaar-sender")
-		var err error
 		if cfg.SenderPoolSize, err = positiveInt(getenv, EnvSenderPoolSize, "256"); err != nil {
 			errs = append(errs, err)
 		}
 		if cfg.SenderBatchSize, err = positiveInt(getenv, EnvSenderBatchSize, "500"); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	// The janitor re-drives through the same chains as the sender, so it reads
+	// the same chain deadline and status timeout.
+	if need&(NeedSender|NeedJanitor) != 0 {
 		for _, d := range []struct {
 			dst  *time.Duration
 			name string
@@ -132,11 +149,31 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 			}
 		}
 	}
-	if need&(NeedSender|NeedWebhook) != 0 {
+	if need&NeedJanitor != 0 {
+		if cfg.JanitorBatchSize, err = positiveInt(getenv, EnvJanitorBatchSize, "50"); err != nil {
+			errs = append(errs, err)
+		}
+		if cfg.JanitorConcurrency, err = positiveInt(getenv, EnvJanitorConcurrency, "50"); err != nil {
+			errs = append(errs, err)
+		}
+		for _, d := range []struct {
+			dst  *time.Duration
+			name string
+			def  string
+		}{
+			{&cfg.JanitorInterval, EnvJanitorInterval, "5s"},
+			{&cfg.JanitorStaleAfter, EnvJanitorStaleAfter, "10s"},
+			{&cfg.SweeperInterval, EnvSweeperInterval, "10m"},
+		} {
+			if *d.dst, err = positiveDuration(getenv, d.name, d.def); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	if need&(NeedSender|NeedWebhook|NeedJanitor) != 0 {
 		cfg.ProvidersFile = valueOr(getenv(EnvProvidersFile), "infra/providers.yaml")
 	}
 	if need&NeedWebhook != 0 {
-		var err error
 		if cfg.WebhookBatchSize, err = positiveInt(getenv, EnvWebhookBatchSize, "200"); err != nil {
 			errs = append(errs, err)
 		}

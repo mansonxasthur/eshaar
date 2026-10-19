@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mansonxasthur/eshaar/cmd/internal/wiring"
 	"github.com/mansonxasthur/eshaar/internal/adapters/kafka"
 	"github.com/mansonxasthur/eshaar/internal/adapters/postgres"
 	"github.com/mansonxasthur/eshaar/internal/domain"
@@ -42,7 +43,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	routes, err := buildRoutes(specs)
+	routes, err := wiring.BuildRoutes(specs)
 	if err != nil {
 		return err
 	}

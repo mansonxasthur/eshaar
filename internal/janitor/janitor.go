@@ -42,24 +42,28 @@ type Janitor struct {
 }
 
 // New returns a Janitor. A recovery pass must finish within StaleAfter, or a
-// second janitor could claim rows this one is still re-driving. New rejects a
-// RedriveBudget longer than StaleAfter and warns when BatchSize rows at
-// Concurrency, each taking RedriveBudget, do not fit in one StaleAfter.
+// second janitor could claim rows this one is still re-driving. So New rejects
+// a RedriveBudget longer than StaleAfter, and a BatchSize larger than
+// Concurrency (every claimed row starts at once and is done within the
+// budget).
 func New(store ports.JanitorStore, redrive Redriver, cfg Config, log *slog.Logger) (*Janitor, error) {
 	switch {
 	case cfg.Interval <= 0 || cfg.SweepInterval <= 0 || cfg.StaleAfter <= 0 || cfg.RedriveBudget <= 0:
 		return nil, errors.New("janitor: intervals, stale age and re-drive budget must be positive")
 	case cfg.BatchSize < 1 || cfg.Concurrency < 1:
 		return nil, errors.New("janitor: batch size and concurrency must be at least 1")
+	case cfg.BatchSize > cfg.Concurrency:
+		// Rows are claimed up front, so a row queued behind a full pool ages while
+		// it waits and could go stale and be claimed again, then sent twice.
+		return nil, fmt.Errorf("janitor: batch size %d is larger than concurrency %d; a claimed row would wait for a slot while its claim goes stale",
+			cfg.BatchSize, cfg.Concurrency)
+	case cfg.Interval > cfg.StaleAfter:
+		return nil, fmt.Errorf("janitor: interval %s is longer than the stale age %s, so recovery would lag the window it is meant to enforce",
+			cfg.Interval, cfg.StaleAfter)
 	}
 	if cfg.RedriveBudget > cfg.StaleAfter {
 		return nil, fmt.Errorf("janitor: a re-drive can take %s, longer than the stale age %s, so a row could be claimed again while it is being re-driven",
 			cfg.RedriveBudget, cfg.StaleAfter)
-	}
-	waves := (cfg.BatchSize + cfg.Concurrency - 1) / cfg.Concurrency
-	if worst := time.Duration(waves) * cfg.RedriveBudget; worst > cfg.StaleAfter {
-		log.Warn("a full recovery pass can outlast the stale age; another janitor may re-claim rows still being re-driven",
-			"batch_size", cfg.BatchSize, "concurrency", cfg.Concurrency, "worst_pass", worst, "stale_after", cfg.StaleAfter)
 	}
 	return &Janitor{store: store, redrive: redrive, cfg: cfg, log: log}, nil
 }
@@ -74,17 +78,21 @@ func (j *Janitor) Run(ctx context.Context) error {
 	return nil
 }
 
-// loop runs pass now and then every interval. A pass runs to the end before
-// the next starts, so one janitor never overlaps itself.
+// loop runs pass now and then again interval after each pass ends. A pass runs
+// to the end before the next starts, so one janitor never overlaps itself.
 func (j *Janitor) loop(ctx context.Context, interval time.Duration, pass func(context.Context)) {
-	t := time.NewTicker(interval)
+	t := time.NewTimer(0)
 	defer t.Stop()
-	for ctx.Err() == nil {
-		pass(ctx)
+	for {
 		select {
 		case <-t.C:
 		case <-ctx.Done():
+			return
 		}
+		pass(ctx)
+		// A timer restarted after the pass leaves a full gap even when the pass
+		// ran long or failed fast, so a failing database is not hammered.
+		t.Reset(interval)
 	}
 }
 

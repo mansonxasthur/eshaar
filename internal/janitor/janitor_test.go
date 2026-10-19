@@ -104,7 +104,7 @@ func rows(n int) []domain.Notification {
 
 func testConfig() Config {
 	return Config{Interval: time.Millisecond, SweepInterval: time.Millisecond, StaleAfter: 10 * time.Second,
-		BatchSize: 10, Concurrency: 3, RedriveBudget: time.Second}
+		BatchSize: 3, Concurrency: 3, RedriveBudget: time.Second}
 }
 
 func newJanitor(t *testing.T, store *fakeStore, rd *fakeRedriver, cfg Config) *Janitor {
@@ -137,7 +137,7 @@ func TestRecoverClaimsThenResumesEveryRow(t *testing.T) {
 	if got := len(rd.ids()); got != 7 {
 		t.Errorf("resumed %d rows, want 7", got)
 	}
-	if store.limits[0] != 10 || store.claimArgs[0] != 10*time.Second {
+	if store.limits[0] != 3 || store.claimArgs[0] != 10*time.Second {
 		t.Errorf("claimed with limit %d stale %v", store.limits[0], store.claimArgs[0])
 	}
 }
@@ -182,7 +182,7 @@ func TestRecoverFinishesClaimedRowsOnShutdown(t *testing.T) {
 	store := &fakeStore{claims: [][]domain.Notification{rows(6)}}
 	rd := &fakeRedriver{hold: 5 * time.Millisecond}
 	cfg := testConfig()
-	cfg.Concurrency = 1
+	cfg.Concurrency, cfg.BatchSize = 1, 1
 	j := newJanitor(t, store, rd, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -196,7 +196,7 @@ func TestRecoverFinishesClaimedRowsOnShutdown(t *testing.T) {
 }
 
 func TestSweepRunsBatchesUntilShort(t *testing.T) {
-	store := &fakeStore{sweeps: []int{10, 10, 4}}
+	store := &fakeStore{sweeps: []int{3, 3, 1}}
 	cfg := testConfig()
 	newJanitor(t, store, &fakeRedriver{}, cfg).sweep(context.Background())
 	if got := store.sweepCalls(); got != 3 {
@@ -236,13 +236,15 @@ func TestRunLoopsUntilCancelled(t *testing.T) {
 
 func TestNewValidatesConfig(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"interval":    func(c *Config) { c.Interval = 0 },
-		"sweep":       func(c *Config) { c.SweepInterval = 0 },
-		"stale":       func(c *Config) { c.StaleAfter = 0 },
-		"budget":      func(c *Config) { c.RedriveBudget = 0 },
-		"slow budget": func(c *Config) { c.RedriveBudget = c.StaleAfter + time.Second },
-		"batch":       func(c *Config) { c.BatchSize = 0 },
-		"concurrency": func(c *Config) { c.Concurrency = 0 },
+		"interval":               func(c *Config) { c.Interval = 0 },
+		"sweep":                  func(c *Config) { c.SweepInterval = 0 },
+		"stale":                  func(c *Config) { c.StaleAfter = 0 },
+		"budget":                 func(c *Config) { c.RedriveBudget = 0 },
+		"slow budget":            func(c *Config) { c.RedriveBudget = c.StaleAfter + time.Second },
+		"batch":                  func(c *Config) { c.BatchSize = 0 },
+		"concurrency":            func(c *Config) { c.Concurrency = 0 },
+		"batch over concurrency": func(c *Config) { c.BatchSize = c.Concurrency + 1 },
+		"slow interval":          func(c *Config) { c.Interval = c.StaleAfter + time.Second },
 	} {
 		cfg := testConfig()
 		mutate(&cfg)
