@@ -78,7 +78,11 @@ func ParseProviders(data []byte, getenv func(string) string) (Providers, error) 
 			}
 			return []byte(v)
 		}
-		if len(sub[2]) > 0 || bytes.Contains(m, []byte(":-")) {
+		if bytes.Contains(m, []byte(":-")) {
+			if len(sub[2]) > 0 && !safeValue.Match(sub[2]) {
+				errs = append(errs, fmt.Errorf("default of %s: %q has characters other than letters, digits and . _ + -", sub[1], sub[2]))
+				return nil
+			}
 			return sub[2]
 		}
 		errs = append(errs, fmt.Errorf("environment variable %s is not set", sub[1]))

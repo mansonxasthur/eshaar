@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -287,5 +288,72 @@ func TestFailedInsertIsRedeliveredNotLost(t *testing.T) {
 	}
 	if got := len(provider.Sent()); got != 3 {
 		t.Errorf("provider sends = %d, want 3", got)
+	}
+}
+
+// TestFallbackOutcomesReachTheRows runs one request whose three channels each
+// take a different path: email is rate limited by A and goes to B; on sms A
+// times out but took the message, so the status check accepts it from A; on
+// whatsapp both providers time out, so the row is unresolved.
+func TestFallbackOutcomesReachTheRows(t *testing.T) {
+	e := startEnv(t)
+	const topic = "fallback"
+	e.createTopic(t, topic)
+
+	route := func(p ports.Provider) sender.Route { return sender.Route{Provider: p, Timeout: 300 * time.Millisecond} }
+	smsA := mock.NewProvider("sms-a", mock.WithScript(mock.Step{Delay: time.Minute, Took: true}))
+	smsB := mock.NewProvider("sms-b")
+	providers := map[domain.Channel][]sender.Route{
+		domain.ChannelEmail: {
+			route(mock.NewProvider("email-a", mock.WithRateLimited())),
+			route(mock.NewProvider("email-b")),
+		},
+		domain.ChannelSMS: {route(smsA), route(smsB)},
+		domain.ChannelWhatsApp: {
+			route(mock.NewProvider("whatsapp-a", mock.WithDelay(time.Minute))),
+			route(mock.NewProvider("whatsapp-b", mock.WithDelay(time.Minute))),
+		},
+	}
+	stop := start(t, func(ctx context.Context) error {
+		return serve(ctx, e.config(topic), slog.New(slog.DiscardHandler), providers)
+	})
+	defer stop()
+
+	e.publish(t, topic, request("fb-1"))
+	eventually(t, "every channel settled", func() bool {
+		return e.count(t, `idempotency_key = 'fb-1' AND state IN ('accepted', 'unresolved')`) == 3
+	})
+
+	type row struct {
+		state, reason string
+		provider, id  *string
+	}
+	got := map[string]row{}
+	rows, err := e.db.Query(context.Background(),
+		`SELECT channel, state, COALESCE(failure_reason, ''), provider, provider_message_id FROM notifications WHERE idempotency_key = 'fb-1'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var channel string
+		var r row
+		if err := rows.Scan(&channel, &r.state, &r.reason, &r.provider, &r.id); err != nil {
+			t.Fatal(err)
+		}
+		got[channel] = r
+	}
+
+	if r := got["email"]; r.state != "accepted" || r.provider == nil || *r.provider != "email-b" {
+		t.Errorf("email = %+v, want accepted by email-b after A's rate limit", r)
+	}
+	if r := got["sms"]; r.state != "accepted" || r.provider == nil || *r.provider != "sms-a" || r.id == nil || !strings.HasPrefix(*r.id, "sms-a-") {
+		t.Errorf("sms = %+v, want accepted by sms-a through the status check", r)
+	}
+	if n := len(smsB.Sent()); n != 0 {
+		t.Errorf("sms-b took %d messages, want 0 (no duplicate)", n)
+	}
+	if r := got["whatsapp"]; r.state != "unresolved" || r.provider != nil || r.reason == "" {
+		t.Errorf("whatsapp = %+v, want unresolved with a reason and no provider", r)
 	}
 }

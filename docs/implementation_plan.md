@@ -65,13 +65,16 @@ The goal is a Kafka consumer group where each consumer saves a notification befo
 The goal is a mock provider and the fallback logic from provider A to provider B, with a circuit breaker around each provider.
 
 - Build a mock provider that can succeed, fail, delay, return a rate-limit response, and accept a message then send a failure webhook later.
-- Run each channel send as: provider A first, and on a failure switch to provider B immediately.
-- On a timeout, make one final status check against provider A with the idempotency key if the provider supports it, then switch to provider B. If it cannot check, switch anyway.
-- On a rate-limit response, switch to the other provider without retrying.
+- Give each channel an ordered chain of providers (A, B, maybe C), each with its own rate limit, call timeout and circuit breaker, configured in `infra/providers.yaml` with values from the environment.
+- Run each channel send as: provider A first, and on a failure switch to the next provider immediately.
+- On a timeout, make one final status check against that provider with the idempotency key if it supports it, then switch to the next. If it cannot check, switch anyway.
+- On a rate-limit response, switch to the next provider without retrying.
 - Wrap each provider in a circuit breaker for transient errors and timeouts only.
-- Save the outcome after each attempt: `accepted` with `provider_message_id`, or `unresolved` if both providers time out.
+- Save the outcome when the chain ends: `accepted` with `provider_message_id`, `unresolved` if nothing accepted and a provider timed out, or `failed` if every provider refused. Log every attempt.
 
-**Tests:** unit tests for each fallback branch (failure, timeout with a positive status check, timeout with no check, rate limit, both timing out) and for the circuit breaker opening and closing.
+**Tests:** unit tests for each fallback branch (failure, timeout with a positive status check, timeout with no check, rate limit, both timing out, a chain of three) and for the circuit breaker opening and closing, plus an end-to-end test of the outcomes reaching the rows.
+
+**Status: done.** Providers and policies are in `infra/providers.yaml`; `bin/sender` reads it (`PROVIDERS_CONFIG`). Decisions are in the decision log under Providers and fallback.
 
 ## Phase 5: Webhooks
 

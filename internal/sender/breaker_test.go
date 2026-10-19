@@ -183,7 +183,7 @@ func TestBreakerKeepsStatusCheck(t *testing.T) {
 	for name, wrapped := range map[string]ports.Provider{
 		"breaker":     newBreaker(p, &clock{}),
 		"rate limit":  WithRateLimit(p, 100),
-		"both":        WithRateLimit(newBreaker(p, &clock{}), 100),
+		"both":        newBreaker(WithRateLimit(p, 100), &clock{}),
 		"not checker": newBreaker(&scripted{}, &clock{}),
 	} {
 		_, ok := wrapped.(ports.StatusChecker)
@@ -273,4 +273,39 @@ type panicky struct{}
 func (panicky) Name() string { return "panicky" }
 func (panicky) Send(context.Context, domain.Notification) (string, error) {
 	panic("boom")
+}
+
+func TestBreakerIgnoresLimiterWaitErrors(t *testing.T) {
+	c := &clock{}
+	inner := WithRateLimit(&scripted{}, 1)
+	b := WithBreaker(inner, BreakerConfig{FailureThreshold: 1, OpenFor: time.Minute, Now: c.now})
+	if err := send(b); err != nil { // uses the single token
+		t.Fatal(err)
+	}
+	for range 3 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		_, err := b.Send(ctx, domain.Notification{})
+		cancel()
+		if err == nil || errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("err = %v, want the limiter's wait error and a closed breaker", err)
+		}
+		if !errors.Is(err, ports.ErrTransient) {
+			t.Fatalf("err = %v, want it transient for the fallback", err)
+		}
+	}
+}
+
+func TestOpenBreakerDoesNotUseALimiterToken(t *testing.T) {
+	c := &clock{}
+	p := &scripted{errs: []error{ports.ErrTimeout}}
+	b := WithBreaker(WithRateLimit(p, 1000), BreakerConfig{FailureThreshold: 1, OpenFor: time.Minute, Now: c.now})
+	_ = send(b)
+	for range 5 {
+		if err := send(b); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("err = %v, want open", err)
+		}
+	}
+	if p.calls != 1 {
+		t.Errorf("provider called %d times, want 1", p.calls)
+	}
 }

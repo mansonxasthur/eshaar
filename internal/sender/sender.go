@@ -146,6 +146,13 @@ func (s *Sender) dispatch(ctx context.Context, rows []domain.Notification) {
 		go func() {
 			defer s.wg.Done()
 			defer func() { <-s.slots }()
+			// A provider that panics must not take the process, and every other
+			// in-flight send, down. The row stays pending for the janitor.
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.ErrorContext(ctx, "send panicked; row stays pending", "notification_id", n.ID, "channel", n.Channel, "panic", fmt.Sprint(r))
+				}
+			}()
 			s.send(ctx, n)
 		}()
 	}

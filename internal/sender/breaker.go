@@ -42,8 +42,8 @@ const (
 
 // breaker stops calling a provider that keeps failing. Only transient errors
 // and timeouts count as failures. A rate-limit or rejection means the provider
-// answered, so it counts as a healthy response. A cancelled context is the
-// caller's doing and counts as neither.
+// answered, so it counts as a healthy response. A cancelled context or a wait
+// on the outbound limiter is the caller's doing and counts as neither.
 type breaker struct {
 	ports.Provider
 	cfg BreakerConfig
@@ -63,8 +63,9 @@ type breaker struct {
 // a row it fails fast with ErrCircuitOpen, and after OpenFor it lets one probe
 // through: a healthy answer closes the breaker, a failure opens it again.
 //
-// Put the breaker inside the rate limit, WithRateLimit(WithBreaker(p, cfg), rps),
-// so the limiter's own wait errors are not counted as provider failures.
+// Put the breaker outside the rate limit, WithBreaker(WithRateLimit(p, rps), cfg),
+// so an open breaker fails fast without waiting for or using a limiter token.
+// The limiter's own wait errors are not counted as provider failures.
 func WithBreaker(p ports.Provider, cfg BreakerConfig) ports.Provider {
 	cfg.FailureThreshold = max(1, cfg.FailureThreshold)
 	if cfg.OpenFor <= 0 {
@@ -122,7 +123,7 @@ func (b *breaker) record(gen int, err error) {
 		return
 	}
 	switch {
-	case errors.Is(err, context.Canceled):
+	case errors.Is(err, context.Canceled), errors.Is(err, errLimiterWait):
 		b.probing = false // let the next call probe instead
 	case isProviderFailure(err):
 		b.failures++

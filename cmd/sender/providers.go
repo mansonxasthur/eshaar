@@ -51,9 +51,10 @@ func buildRoutes(specs config.Providers) (map[domain.Channel][]sender.Route, err
 	return routes, nil
 }
 
-// newProvider builds one provider from its spec: the adapter, inside a circuit
-// breaker and, outside that, the outbound rate limit, so the limiter's own wait
-// errors never count against the breaker.
+// newProvider builds one provider from its spec: the adapter, inside the
+// outbound rate limit and, outside that, a circuit breaker, so an open breaker
+// fails fast without using a limiter token. The limiter's own wait errors never
+// count against the breaker.
 func newProvider(spec config.Provider) (ports.Provider, error) {
 	var p ports.Provider
 	switch spec.Kind {
@@ -62,6 +63,6 @@ func newProvider(spec config.Provider) (ports.Provider, error) {
 	default:
 		return nil, fmt.Errorf("provider %s: unknown kind %q", spec.Name, spec.Kind)
 	}
-	p = sender.WithBreaker(p, sender.BreakerConfig{FailureThreshold: spec.Breaker.Failures, OpenFor: spec.Breaker.OpenFor})
-	return sender.WithRateLimit(p, spec.RPS), nil
+	p = sender.WithRateLimit(p, spec.RPS)
+	return sender.WithBreaker(p, sender.BreakerConfig{FailureThreshold: spec.Breaker.Failures, OpenFor: spec.Breaker.OpenFor}), nil
 }

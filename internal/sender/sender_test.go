@@ -428,3 +428,17 @@ func TestRateLimitWaitHonoursTimeout(t *testing.T) {
 		t.Error("second call within the limit window should fail once the context expires")
 	}
 }
+
+// A provider that panics must not crash the sender; the row stays pending.
+func TestProviderPanicLeavesRowPending(t *testing.T) {
+	h := newHarness(t, testConfig(), &fakeBatch{reqs: []domain.Request{req("k1", domain.ChannelSMS)}})
+	h.provider.send = func(context.Context, domain.Notification) (string, error) { panic("boom") }
+	stop := h.run(t)
+	eventually(t, "the send to start", func() bool { return h.rec.count("send:k1") == 1 })
+	stop()
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if len(h.store.accepted)+len(h.store.failed)+len(h.store.unresolved) != 0 {
+		t.Error("a panicking send was recorded")
+	}
+}

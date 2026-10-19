@@ -91,6 +91,7 @@ func TestParseProvidersRejectsBadInput(t *testing.T) {
 		"not yaml":              "sms: [",
 		"empty env, no default": strings.Replace(good, "rps: 1", "rps: ${EMPTY}", 1),
 		"yaml injection":        strings.Replace(good, "timeout: 1s", "timeout: ${INJECT}", 1),
+		"unsafe default":        strings.Replace(good, "timeout: 1s", "timeout: ${X:-1s, name: y}", 1),
 		"comment-only file":     "# nothing here\n",
 		"bare number timeout":   strings.Replace(good, "timeout: 1s", "timeout: 2", 1),
 	}
