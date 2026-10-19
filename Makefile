@@ -57,6 +57,8 @@ stack-up: ## Build and start Postgres, Kafka and the five Eshaar processes
 	$(COMPOSE) up -d --build --wait postgres kafka
 	$(COMPOSE) run --rm kafka-init
 	$(COMPOSE) --profile stack up -d --build dispatcher sender webhook janitor
+	@for i in $$(seq 1 30); do curl -sf http://localhost:8080/healthz >/dev/null && exit 0; sleep 1; done; \
+		echo "dispatcher did not answer /healthz"; exit 1
 
 stack-down: ## Stop the full stack (add -v via COMPOSE_DOWN_FLAGS to drop data)
 	$(COMPOSE) --profile stack down $(COMPOSE_DOWN_FLAGS)

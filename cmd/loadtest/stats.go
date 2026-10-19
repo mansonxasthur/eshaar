@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"sort"
 	"time"
 )
@@ -42,7 +43,9 @@ func summarize(target int, results []result, behind int, elapsed time.Duration) 
 		default:
 			r.Failed++
 		}
-		lat = append(lat, res.latency)
+		if res.status != 0 { // a request that got no answer has no latency worth ranking
+			lat = append(lat, res.latency)
+		}
 	}
 	if elapsed > 0 {
 		r.AchievedRPS = float64(r.Accepted) / elapsed.Seconds()
@@ -60,7 +63,7 @@ func percentile(d []time.Duration, p float64) float64 {
 		return 0
 	}
 	sort.Slice(d, func(i, j int) bool { return d[i] < d[j] })
-	rank := int(p*float64(len(d))+0.999999) - 1
+	rank := int(math.Ceil(p*float64(len(d)))) - 1
 	rank = min(max(rank, 0), len(d)-1)
 	return float64(d[rank]) / float64(time.Millisecond)
 }

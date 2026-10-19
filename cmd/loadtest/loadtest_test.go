@@ -35,6 +35,9 @@ func TestSummarizeCountsEachStatus(t *testing.T) {
 	if r.Accepted != 2 || r.RateLimited != 1 || r.Unavailable != 1 || r.Failed != 2 || r.Behind != 7 || r.Sent != 6 {
 		t.Errorf("report = %+v", r)
 	}
+	if r.P99Ms != 1 { // the request with no answer is not a latency sample
+		t.Errorf("p99 = %v", r.P99Ms)
+	}
 	if r.AchievedRPS != 1 {
 		t.Errorf("achieved = %v, want 1", r.AchievedRPS)
 	}
@@ -101,6 +104,8 @@ func TestRunRejectsBadFlags(t *testing.T) {
 		{"-keys", "k", "-rates", "x"},
 		{"-keys", "k", "-channels", "fax"},
 		{"-keys", "k", "-channels", ","},
+		{"-keys", "k", "-workers", "0"},
+		{"-keys", "k", "-step", "0s"},
 	} {
 		if err := run(args, &bytes.Buffer{}); err == nil || strings.TrimSpace(err.Error()) == "" {
 			t.Errorf("run(%v) accepted bad input", args)

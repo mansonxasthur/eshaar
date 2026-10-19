@@ -41,6 +41,9 @@ func run(args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *workers < 1 || *stepFor <= 0 {
+		return fmt.Errorf("-workers must be at least 1 and -step positive")
+	}
 	keyList := splitList(*keys)
 	if len(keyList) == 0 {
 		return fmt.Errorf("no API keys: set -keys or LOADTEST_API_KEYS")
