@@ -19,7 +19,7 @@ const (
 	// could never satisfy.
 	maxBodyBytes = 512 << 10
 	// publishTimeout bounds the wait for Kafka to confirm.
-	publishTimeout = 5 * time.Second
+	publishTimeout = time.Second
 )
 
 // Handler serves the dispatcher API.
@@ -50,8 +50,7 @@ func (h *Handler) createNotification(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
@@ -63,8 +62,7 @@ func (h *Handler) createNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
@@ -73,8 +71,7 @@ func (h *Handler) createNotification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := req.Validate(); err != nil {
-		var ve *domain.ValidationError
-		if errors.As(err, &ve) {
+		if ve, ok := errors.AsType[*domain.ValidationError](err); ok {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request", "fields": ve.Fields})
 			return
 		}
