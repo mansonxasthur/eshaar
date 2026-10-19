@@ -90,6 +90,9 @@ There is one `notifications` row per channel, keyed by the idempotency key plus 
 - It becomes `unresolved` when both providers time out, or when a janitor gives up on it.
 - Transitions only move forward. A late or duplicate event cannot overwrite a final state.
 - An `unresolved` row can still become `delivered` or `failed` if a late webhook arrives.
+- A row goes straight from `pending` to `failed` when every provider rejects the send outright (not a timeout), with `failure_reason` set.
+- A row never goes from `pending` to `delivered`, or from `accepted` to `unresolved`. A webhook that beats the `accepted` write is stored with no `notification_id` and re-resolved by the webhook phase once the row is accepted. Only `pending` rows are swept to `unresolved`.
+- Applying the state a row is already in is a no-op (`ErrNoChange`), so duplicate webhooks and re-drives are not errors.
 
 ### webhook\_events
 
