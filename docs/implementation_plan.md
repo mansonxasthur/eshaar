@@ -58,6 +58,8 @@ The goal is a Kafka consumer group where each consumer saves a notification befo
 
 **Tests:** unit tests for the insert-then-ack order and duplicate handling, and an end-to-end test that one message produces the expected rows and sends.
 
+**Status: done.** Run it with `make up && make migrate`, then `bin/sender` (several instances form the group). The pool sends once through the mock provider and records `accepted` or `failed`; fallback and the circuit breaker are Phase 4. Decisions are in the decision log under Sender.
+
 ## Phase 4: Providers and fallback
 
 The goal is a mock provider and the fallback logic from provider A to provider B, with a circuit breaker around each provider.
