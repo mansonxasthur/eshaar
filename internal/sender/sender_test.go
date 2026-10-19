@@ -328,7 +328,7 @@ func TestSendTimeoutMarksUnresolved(t *testing.T) {
 
 func TestMissingProviderMarksFailed(t *testing.T) {
 	h := newHarness(t, testConfig(), &fakeBatch{reqs: []domain.Request{req("k1", domain.ChannelSMS)}})
-	delete(h.sender.providers, domain.ChannelSMS)
+	delete(h.sender.deliverer.chains, domain.ChannelSMS)
 	stop := h.run(t)
 	eventually(t, "a failed row", func() bool { h.store.mu.Lock(); defer h.store.mu.Unlock(); return len(h.store.failed) == 1 })
 	stop()
@@ -455,7 +455,7 @@ func TestProviderPanicLeavesRowPending(t *testing.T) {
 func TestNoProviderTriedLeavesRowPending(t *testing.T) {
 	h := newHarness(t, testConfig())
 	h.provider.send = func(context.Context, domain.Notification) (string, error) { return "", ErrCircuitOpen }
-	h.sender.send(context.Background(), domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS})
+	h.sender.deliverer.Send(context.Background(), domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS})
 	if h.rec.count("send:k1") != 1 {
 		t.Fatal("the provider was not called")
 	}
@@ -468,11 +468,11 @@ func TestNoProviderTriedLeavesRowPending(t *testing.T) {
 
 func TestPendingRowRecordsTheLastProviderCalled(t *testing.T) {
 	h := newHarness(t, testConfig())
-	h.sender.providers[domain.ChannelSMS] = []Route{
+	h.sender.deliverer.chains[domain.ChannelSMS] = []Route{
 		{Provider: &stub{name: "sms-a", send: fails(errRejected)}, Timeout: time.Second},
 		{Provider: &stub{name: "sms-b", send: fails(ErrCircuitOpen)}, Timeout: time.Second},
 	}
-	h.sender.send(context.Background(), domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS})
+	h.sender.deliverer.Send(context.Background(), domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS})
 	h.store.mu.Lock()
 	defer h.store.mu.Unlock()
 	if got := h.store.lastTried["id1"]; got != "sms-a" {
