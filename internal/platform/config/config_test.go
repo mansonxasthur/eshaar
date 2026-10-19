@@ -179,3 +179,54 @@ func TestLoadSenderReportsEveryProblem(t *testing.T) {
 		t.Errorf("unneeded settings were validated: %v", err)
 	}
 }
+
+func TestLoadWebhookDefaults(t *testing.T) {
+	cfg, err := Load(env(map[string]string{EnvDatabaseURL: "postgres://localhost/eshaar"}), NeedDatabase|NeedHTTP|NeedWebhook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebhookBatchSize != 200 || cfg.WebhookFlushers != 4 || cfg.WebhookResolveBatch != 200 ||
+		cfg.WebhookQueueSize != 1600 || cfg.WebhookFlushInterval != 20*time.Millisecond ||
+		cfg.WebhookFlushTimeout != 5*time.Second || cfg.WebhookResolveInterval != time.Second ||
+		cfg.ProvidersFile != "infra/providers.yaml" {
+		t.Errorf("defaults = %+v", cfg)
+	}
+}
+
+func TestLoadWebhookOverridesAndQueueFollowsBatchAndFlushers(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		EnvDatabaseURL: "postgres://localhost/eshaar", EnvWebhookBatchSize: "10", EnvWebhookFlushers: "3",
+		EnvWebhookFlushInterval: "50ms", EnvProvidersFile: "/etc/providers.yaml",
+	}), NeedDatabase|NeedWebhook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebhookBatchSize != 10 || cfg.WebhookQueueSize != 60 || cfg.WebhookFlushInterval != 50*time.Millisecond || cfg.ProvidersFile != "/etc/providers.yaml" {
+		t.Errorf("config = %+v", cfg)
+	}
+	cfg, err = Load(env(map[string]string{EnvDatabaseURL: "postgres://localhost/eshaar", EnvWebhookQueueSize: "7"}), NeedDatabase|NeedWebhook)
+	if err != nil || cfg.WebhookQueueSize != 7 {
+		t.Errorf("explicit queue size ignored: %d, %v", cfg.WebhookQueueSize, err)
+	}
+}
+
+func TestLoadWebhookRejectsBadSettings(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		EnvDatabaseURL: "postgres://localhost/eshaar", EnvWebhookBatchSize: "0", EnvWebhookFlushers: "x",
+		EnvWebhookFlushInterval: "-1s", EnvWebhookFlushTimeout: "soon", EnvWebhookResolveInterval: "0s", EnvWebhookResolveBatch: "-3",
+	}), NeedDatabase|NeedWebhook)
+	if err == nil {
+		t.Fatal("bad settings accepted")
+	}
+	for _, name := range []string{EnvWebhookBatchSize, EnvWebhookFlushers, EnvWebhookFlushInterval, EnvWebhookFlushTimeout, EnvWebhookResolveInterval, EnvWebhookResolveBatch} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error does not mention %s: %v", name, err)
+		}
+	}
+}
+
+func TestLoadWebhookSettingsAreOnlyCheckedWhenNeeded(t *testing.T) {
+	if _, err := Load(env(map[string]string{EnvDatabaseURL: "postgres://localhost/eshaar", EnvWebhookBatchSize: "garbage"}), NeedDatabase); err != nil {
+		t.Errorf("unneeded webhook setting was validated: %v", err)
+	}
+}

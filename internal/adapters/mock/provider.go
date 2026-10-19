@@ -1,10 +1,13 @@
 // Package mock simulates an external provider. It can accept, fail, delay,
 // answer with a rate-limit response, take a message and lose the reply, answer
-// status checks, and report a failure by webhook after accepting.
+// status checks, and report a delivery or a failure by webhook after accepting.
 package mock
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -29,9 +32,11 @@ type Step struct {
 	Took bool
 }
 
-// Event is a webhook the provider reports after it accepted a message.
+// Event is a webhook the provider reports after it accepted a message. Status
+// is domain.StateDelivered or domain.StateFailed.
 type Event struct {
 	Provider       string
+	EventID        string // unique per event of one provider, so a resent event is a duplicate
 	MessageID      string
 	IdempotencyKey string
 	Channel        domain.Channel
@@ -39,19 +44,47 @@ type Event struct {
 	Reason         string
 }
 
-// Provider accepts notifications and remembers them.
+// JSON returns the body a real provider would POST to the webhook endpoint for
+// this event: the fields the endpoint reads, as JSON. The caller signs it with
+// the provider's secret. The mock does not import the webhook package, so this
+// shape is the contract between the two, and the end-to-end test of cmd/webhook
+// holds them together.
+func (e Event) JSON() []byte {
+	b, err := json.Marshal(map[string]string{
+		"event_id":        e.EventID,
+		"message_id":      e.MessageID,
+		"idempotency_key": e.IdempotencyKey,
+		"channel":         string(e.Channel),
+		"status":          string(e.Status),
+		"reason":          e.Reason,
+	})
+	if err != nil { // a map of strings always marshals
+		panic(err)
+	}
+	return b
+}
+
+// Provider accepts notifications and remembers them. Message and event ids carry
+// a random part chosen when the Provider is built: they must stay unique across
+// restarts, since the database keeps one row per (provider, message id) and one
+// event per (provider, event id).
 type Provider struct {
-	name      string
+	name string
+	run  string // random per Provider, so ids do not repeat after a restart
+
 	delay     time.Duration
 	err       error
 	script    []Step
 	statusErr error
 
 	lateAfter  time.Duration
+	lateStatus domain.State
+	lateReason string
 	lateNotify func(Event)
 
-	calls atomic.Int64
-	seq   atomic.Int64
+	calls    atomic.Int64
+	seq      atomic.Int64
+	eventSeq atomic.Int64
 
 	mu    sync.Mutex
 	sent  []domain.Notification
@@ -89,12 +122,30 @@ func WithStatusError(err error) Option { return func(p *Provider) { p.statusErr 
 // WithLateFailure makes the provider accept a message and, after d, call notify
 // with a failed event for it. The webhook receiver consumes these in tests.
 func WithLateFailure(d time.Duration, notify func(Event)) Option {
-	return func(p *Provider) { p.lateAfter, p.lateNotify = d, notify }
+	return withLateReport(d, domain.StateFailed, "mock late failure", notify)
+}
+
+// WithLateDelivery makes the provider accept a message and, after d, call notify
+// with a delivered event for it. With a d of zero the event can reach the
+// receiver before the sender has recorded the accept, which is how a test
+// exercises an event that beats its notification.
+func WithLateDelivery(d time.Duration, notify func(Event)) Option {
+	return withLateReport(d, domain.StateDelivered, "", notify)
+}
+
+func withLateReport(d time.Duration, status domain.State, reason string, notify func(Event)) Option {
+	return func(p *Provider) {
+		p.lateAfter, p.lateStatus, p.lateReason, p.lateNotify = d, status, reason, notify
+	}
 }
 
 // NewProvider returns a provider called name.
 func NewProvider(name string, opts ...Option) *Provider {
-	p := &Provider{name: name, taken: map[string]string{}}
+	var run [4]byte
+	if _, err := rand.Read(run[:]); err != nil { // never fails on supported platforms
+		panic(err)
+	}
+	p := &Provider{name: name, run: hex.EncodeToString(run[:]), taken: map[string]string{}}
 	for _, o := range opts {
 		o(p)
 	}
@@ -121,7 +172,7 @@ func (p *Provider) Send(ctx context.Context, n domain.Notification) (string, err
 	if id == "" {
 		id = p.take(n)
 	}
-	p.scheduleFailure(n, id)
+	p.scheduleReport(n, id)
 	return id, nil
 }
 
@@ -156,24 +207,25 @@ func (p *Provider) nextStep() Step {
 
 func (p *Provider) take(n domain.Notification) string {
 	p.mu.Lock()
-	id := fmt.Sprintf("%s-%d", p.name, p.seq.Add(1))
+	id := fmt.Sprintf("%s-%s-%d", p.name, p.run, p.seq.Add(1))
 	p.sent = append(p.sent, n)
 	p.taken[takenKey(n.IdempotencyKey, n.Channel)] = id
 	p.mu.Unlock()
 	return id
 }
 
-func (p *Provider) scheduleFailure(n domain.Notification, id string) {
+func (p *Provider) scheduleReport(n domain.Notification, id string) {
 	if p.lateNotify == nil {
 		return
 	}
 	ev := Event{
 		Provider:       p.name,
+		EventID:        fmt.Sprintf("%s-%s-evt-%d", p.name, p.run, p.eventSeq.Add(1)),
 		MessageID:      id,
 		IdempotencyKey: n.IdempotencyKey,
 		Channel:        n.Channel,
-		Status:         domain.StateFailed,
-		Reason:         "mock late failure",
+		Status:         p.lateStatus,
+		Reason:         p.lateReason,
 	}
 	time.AfterFunc(p.lateAfter, func() { p.lateNotify(ev) })
 }

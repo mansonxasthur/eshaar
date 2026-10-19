@@ -90,6 +90,8 @@ The goal is an endpoint that validates provider events and records the final del
 
 **Tests:** unit tests for signature validation, duplicate events and out-of-order events, and an end-to-end test where the mock provider accepts a message and later sends a failure webhook.
 
+**Status: done.** Run it with `make up && make migrate`, then `SMS_A_WEBHOOK_SECRET=<16+ characters> bin/webhook` (a provider without a secret cannot deliver webhooks). Decisions are in the decision log under Webhooks.
+
 ## Phase 6: Janitors
 
 The goal is two background jobs that recover stalled rows and mark the ones that never complete as `unresolved`.

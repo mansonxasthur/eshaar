@@ -15,6 +15,11 @@
 # per second to that provider on that channel. timeout limits one call to it.
 # breaker.failures consecutive transient errors or timeouts open it for
 # breaker.open_for, after which one probe call decides whether it closes.
+#
+# webhook_secret is the key the provider signs its webhooks with (at least 16
+# characters of letters, digits and . _ + -). Only the webhook process reads it,
+# and a provider with an empty one cannot deliver webhooks. It is empty here so
+# the sender starts without it; set it in the environment.
 sms:
   - name: sms-a
     kind: mock
@@ -22,12 +27,14 @@ sms:
     rps: ${SMS_A_RPS:-1000}
     timeout: ${SMS_A_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    webhook_secret: "${SMS_A_WEBHOOK_SECRET:-}"
   - name: sms-b
     kind: mock
     priority: ${SMS_B_PRIORITY:-2}
     rps: ${SMS_B_RPS:-1000}
     timeout: ${SMS_B_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    webhook_secret: "${SMS_B_WEBHOOK_SECRET:-}"
 email:
   - name: email-a
     kind: mock
@@ -35,12 +42,14 @@ email:
     rps: ${EMAIL_A_RPS:-1000}
     timeout: ${EMAIL_A_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    webhook_secret: "${EMAIL_A_WEBHOOK_SECRET:-}"
   - name: email-b
     kind: mock
     priority: ${EMAIL_B_PRIORITY:-2}
     rps: ${EMAIL_B_RPS:-1000}
     timeout: ${EMAIL_B_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    webhook_secret: "${EMAIL_B_WEBHOOK_SECRET:-}"
 whatsapp:
   - name: whatsapp-a
     kind: mock
@@ -48,9 +57,11 @@ whatsapp:
     rps: ${WHATSAPP_A_RPS:-1000}
     timeout: ${WHATSAPP_A_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    webhook_secret: "${WHATSAPP_A_WEBHOOK_SECRET:-}"
   - name: whatsapp-b
     kind: mock
     priority: ${WHATSAPP_B_PRIORITY:-2}
     rps: ${WHATSAPP_B_RPS:-1000}
     timeout: ${WHATSAPP_B_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    webhook_secret: "${WHATSAPP_B_WEBHOOK_SECRET:-}"

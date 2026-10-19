@@ -2,13 +2,16 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -29,6 +32,41 @@ type Provider struct {
 	RPS      float64       `yaml:"rps"`      // outbound calls per second to this provider on this channel
 	Timeout  time.Duration `yaml:"timeout"`  // limit for one call to it
 	Breaker  Breaker       `yaml:"breaker"`
+
+	// WebhookSecret is the key the provider signs its webhooks with. It is
+	// optional: only cmd/webhook uses it (and checks its length), and a
+	// provider without one cannot deliver webhooks. Being set through a
+	// placeholder, it can only hold letters, digits and . _ + - (hex is a good
+	// choice).
+	WebhookSecret Secret `yaml:"webhook_secret"`
+}
+
+// Secret is a credential that prints as [redacted] with %v, %+v, %#v, in JSON and
+// in slog, so logging a Provider or the whole chain cannot leak it. Reveal returns
+// the value.
+type Secret string
+
+// Reveal returns the secret itself.
+func (s Secret) Reveal() string { return string(s) }
+
+// String implements fmt.Stringer.
+func (s Secret) String() string { return redacted(s) }
+
+// GoString implements fmt.GoStringer.
+func (s Secret) GoString() string { return redacted(s) }
+
+// LogValue implements slog.LogValuer.
+func (s Secret) LogValue() slog.Value { return slog.StringValue(redacted(s)) }
+
+// MarshalJSON implements json.Marshaler, which slog's JSON handler uses for a
+// Secret nested in a struct.
+func (s Secret) MarshalJSON() ([]byte, error) { return json.Marshal(redacted(s)) }
+
+func redacted(s Secret) string {
+	if s == "" {
+		return ""
+	}
+	return "[redacted]"
 }
 
 // Breaker is the circuit breaker policy of one provider.
@@ -75,7 +113,7 @@ func ParseProviders(data []byte, getenv func(string) string) (Providers, error) 
 		sub := placeholder.FindSubmatch(m)
 		if v := getenv(string(sub[1])); v != "" {
 			if !safeValue.MatchString(v) {
-				errs = append(errs, fmt.Errorf("environment variable %s: %q has characters other than letters, digits and . _ + -", sub[1], v))
+				errs = append(errs, fmt.Errorf("environment variable %s: %s has characters other than letters, digits and . _ + -", sub[1], shown(string(sub[1]), v)))
 				return nil
 			}
 			return []byte(v)
@@ -107,6 +145,20 @@ func ParseProviders(data []byte, getenv func(string) string) (Providers, error) 
 		sort.SliceStable(list, func(i, j int) bool { return list[i].Priority < list[j].Priority })
 	}
 	return p, nil
+}
+
+// shown quotes an environment value for an error message. A variable whose
+// name says it holds a credential (SECRET, KEY, TOKEN or PASS in the name) is
+// not echoed, since errors reach the logs. Other values are, so a bad rps or
+// timeout can be diagnosed; name a credential variable accordingly.
+func shown(name, value string) string {
+	upper := strings.ToUpper(name)
+	for _, w := range []string{"SECRET", "KEY", "TOKEN", "PASS"} {
+		if strings.Contains(upper, w) {
+			return "the value (not shown, the name says it is a credential)"
+		}
+	}
+	return fmt.Sprintf("%q", value)
 }
 
 func (p Providers) validate() error {
