@@ -163,7 +163,7 @@ func req(key string, channels ...domain.Channel) domain.Request {
 }
 
 func testConfig() Config {
-	return Config{PoolSize: 4, SendTimeout: time.Second, ProviderATimeout: time.Second, ProviderBTimeout: time.Second, StatusTimeout: time.Second, DrainTimeout: time.Second, MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond}
+	return Config{PoolSize: 4, SendTimeout: time.Second, StatusTimeout: time.Second, DrainTimeout: time.Second, MinBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond}
 }
 
 type harness struct {
@@ -181,9 +181,9 @@ func newHarness(t *testing.T, cfg Config, batches ...*fakeBatch) *harness {
 		b.rec = rec
 	}
 	h := &harness{rec: rec, consumer: &fakeConsumer{rec: rec, batches: batches}, store: newStore(rec), provider: &fakeProvider{rec: rec}}
-	providers := map[domain.Channel]Pair{}
+	providers := map[domain.Channel][]Route{}
 	for _, c := range domain.Channels() {
-		providers[c] = Pair{A: h.provider}
+		providers[c] = []Route{{Provider: h.provider, Timeout: time.Second}}
 	}
 	s, err := New(h.consumer, h.store, providers, cfg, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -382,8 +382,6 @@ func TestNewValidatesConfig(t *testing.T) {
 	}
 	with(func(c *Config) { c.PoolSize = 0 })
 	with(func(c *Config) { c.SendTimeout = 0 })
-	with(func(c *Config) { c.ProviderATimeout = 0 })
-	with(func(c *Config) { c.ProviderBTimeout = 0 })
 	with(func(c *Config) { c.StatusTimeout = 0 })
 	with(func(c *Config) { c.MinBackoff = 0 })
 	with(func(c *Config) { c.MinBackoff, c.MaxBackoff = 2, 1 })
@@ -392,9 +390,15 @@ func TestNewValidatesConfig(t *testing.T) {
 			t.Errorf("config %d accepted", i)
 		}
 	}
-	noA := map[domain.Channel]Pair{domain.ChannelSMS: {B: &fakeProvider{}}}
-	if _, err := New(nil, nil, noA, testConfig(), slog.New(slog.DiscardHandler)); err == nil {
-		t.Error("a pair without provider A was accepted")
+	badRoutes := map[string][]Route{
+		"nil provider": {{Timeout: time.Second}},
+		"no timeout":   {{Provider: &fakeProvider{}}},
+	}
+	for name, chain := range badRoutes {
+		providers := map[domain.Channel][]Route{domain.ChannelSMS: chain}
+		if _, err := New(nil, nil, providers, testConfig(), slog.New(slog.DiscardHandler)); err == nil {
+			t.Errorf("%s: route accepted", name)
+		}
 	}
 }
 

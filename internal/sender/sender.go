@@ -16,14 +16,12 @@ import (
 
 // Config tunes the sender.
 type Config struct {
-	PoolSize         int           // concurrent channel sends; a full pool stops the consume loop
-	SendTimeout      time.Duration // limit for a whole channel send, across both providers
-	ProviderATimeout time.Duration // limit for one call to provider A
-	ProviderBTimeout time.Duration // limit for one call to provider B
-	StatusTimeout    time.Duration // limit for the status check after A times out
-	DrainTimeout     time.Duration // how long Run waits for in-flight sends on shutdown
-	MinBackoff       time.Duration // first wait after a failed poll or insert
-	MaxBackoff       time.Duration // cap on that wait
+	PoolSize      int           // concurrent channel sends; a full pool stops the consume loop
+	SendTimeout   time.Duration // limit for a whole channel send, across all its providers
+	StatusTimeout time.Duration // limit for the status check after a provider times out
+	DrainTimeout  time.Duration // how long Run waits for in-flight sends on shutdown
+	MinBackoff    time.Duration // first wait after a failed poll or insert
+	MaxBackoff    time.Duration // cap on that wait
 }
 
 // recordTimeout bounds an outcome write, which must not share the send's
@@ -34,7 +32,7 @@ const recordTimeout = 5 * time.Second
 type Sender struct {
 	consumer  ports.Consumer
 	store     ports.NotificationStore
-	providers map[domain.Channel]Pair
+	providers map[domain.Channel][]Route
 	cfg       Config
 	log       *slog.Logger
 	now       func() time.Time
@@ -43,26 +41,33 @@ type Sender struct {
 	wg    sync.WaitGroup
 }
 
-// New returns a Sender. providers maps each channel to its provider pair; a
-// channel without one has its rows failed.
-func New(consumer ports.Consumer, store ports.NotificationStore, providers map[domain.Channel]Pair, cfg Config, log *slog.Logger) (*Sender, error) {
+// New returns a Sender. providers maps each channel to its ordered fallback
+// chain; a channel without one has its rows failed.
+func New(consumer ports.Consumer, store ports.NotificationStore, providers map[domain.Channel][]Route, cfg Config, log *slog.Logger) (*Sender, error) {
 	if cfg.PoolSize < 1 {
 		return nil, errors.New("sender: pool size must be at least 1")
 	}
-	if cfg.SendTimeout <= 0 || cfg.ProviderATimeout <= 0 || cfg.ProviderBTimeout <= 0 || cfg.StatusTimeout <= 0 {
-		return nil, errors.New("sender: send, provider and status timeouts must be positive")
+	if cfg.SendTimeout <= 0 || cfg.StatusTimeout <= 0 {
+		return nil, errors.New("sender: send and status timeouts must be positive")
 	}
 	if cfg.MinBackoff <= 0 || cfg.MaxBackoff < cfg.MinBackoff {
 		return nil, errors.New("sender: backoff needs 0 < min <= max")
 	}
-	for c, pair := range providers {
-		if pair.A == nil {
-			return nil, fmt.Errorf("sender: channel %s has no provider A", c)
+	for c, chain := range providers {
+		var calls time.Duration
+		for i, r := range chain {
+			if r.Provider == nil || r.Timeout <= 0 {
+				return nil, fmt.Errorf("sender: channel %s provider %d needs a provider and a positive timeout", c, i+1)
+			}
+			calls += r.Timeout
 		}
-	}
-	if need := cfg.ProviderATimeout + cfg.StatusTimeout + cfg.ProviderBTimeout; cfg.SendTimeout < need {
-		log.Warn("send timeout is shorter than provider A + status check + provider B; a slow A can leave B no time",
-			"send_timeout", cfg.SendTimeout, "needed", need)
+		if len(chain) > 1 {
+			calls += time.Duration(len(chain)-1) * cfg.StatusTimeout
+		}
+		if cfg.SendTimeout < calls {
+			log.Warn("send timeout is shorter than every provider call plus status checks; a slow provider can leave the next no time",
+				"channel", c, "send_timeout", cfg.SendTimeout, "needed", calls)
+		}
 	}
 	return &Sender{
 		consumer:  consumer,

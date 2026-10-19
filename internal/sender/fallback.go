@@ -12,10 +12,12 @@ import (
 	"github.com/mansonxasthur/eshaar/internal/ports"
 )
 
-// Pair is the two providers behind a channel. The sender tries A first and
-// falls back to B. B may be nil, and then there is no fallback.
-type Pair struct {
-	A, B ports.Provider
+// Route is one provider in a channel's fallback chain, with the limit for a
+// single call to it. A channel's chain is ordered: the first route is tried
+// first and each later one is the fallback for the one before it.
+type Route struct {
+	Provider ports.Provider
+	Timeout  time.Duration
 }
 
 // kind says how a provider call ended.
@@ -53,68 +55,61 @@ type outcome struct {
 	reason    string       // failed and unresolved
 }
 
-// deliver runs the fallback flow for one notification and returns its outcome:
+// deliver runs the fallback flow for one notification over its channel's chain
+// and returns its outcome:
 //
-//   - A accepts, or B accepts after A failed: accepted.
-//   - A rate-limit answer or a failure switches to B at once, with no retry.
-//   - A timeout first asks A, by idempotency key, if it took the message and
-//     accepts A's message ID if so. If A cannot answer, it switches to B and
-//     accepts the possible duplicate.
-//   - Nothing accepted and some attempt timed out :
-//     unresolved, because the message may have been delivered.
-//   - Nothing accepted and every attempt was refused outright: failed.
+//   - A provider accepts: accepted, by the first one that does.
+//   - A rate-limit answer or a failure switches to the next provider at once,
+//     with no retry.
+//   - A timeout first asks that provider, by idempotency key, if it took the
+//     message and accepts its message ID if so. If it cannot answer, it switches
+//     to the next provider and accepts the possible duplicate. The last provider
+//     is not asked: there is nowhere left to switch to.
+//   - Nothing accepted and some attempt timed out: unresolved, because the
+//     message may have been delivered.
+//   - Nothing accepted and every attempt was refused outright, or never made
+//     for lack of time: failed.
 //
 // The whole flow runs under SendTimeout; each provider call also has its own
-// timeout.
-func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notification, pair Pair) outcome {
-	// The status check hangs off the caller's context, not the send deadline: A
-	// may have used all of that deadline, and the check is how we learn that it
-	// took the message anyway. It has its own StatusTimeout.
+// timeout from its route.
+func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notification, chain []Route) outcome {
+	if len(chain) == 0 {
+		return outcome{state: domain.StateFailed, reason: "no provider for channel " + string(n.Channel)}
+	}
+
+	// The status check hangs off the caller's context, not the send deadline: a
+	// provider may have used all of that deadline, and the check is how we learn
+	// that it took the message anyway. It has its own StatusTimeout.
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.SendTimeout)
 	defer cancel()
 
-	steps := []struct {
-		name     string
-		provider ports.Provider
-		timeout  time.Duration
-	}{
-		{"a", pair.A, s.cfg.ProviderATimeout},
-		{"b", pair.B, s.cfg.ProviderBTimeout},
-	}
-
 	var reasons []string
 	uncertain := false
-	for _, step := range steps {
-		if step.provider == nil {
-			continue
-		}
+	for i, route := range chain {
+		name := route.Provider.Name()
 		if ctx.Err() != nil {
-			log.WarnContext(ctx, "no time left for provider", "slot", step.name, "provider", step.provider.Name())
-			reasons = append(reasons, step.provider.Name()+": no time left")
+			log.WarnContext(ctx, "no time left for provider", "attempt", i+1, "provider", name)
+			reasons = append(reasons, name+": no time left")
 			continue
 		}
-		id, err := s.attempt(ctx, log, n, step.name, step.provider, step.timeout)
+		id, err := s.attempt(ctx, log, n, i+1, route)
 		if err == nil {
-			return outcome{state: domain.StateAccepted, provider: step.provider.Name(), messageID: id}
+			return outcome{state: domain.StateAccepted, provider: name, messageID: id}
 		}
-		reasons = append(reasons, fmt.Sprintf("%s: %v", step.provider.Name(), err))
+		reasons = append(reasons, fmt.Sprintf("%s: %v", name, err))
 
 		if kindOf(err) != kindTimeout {
 			continue
 		}
 		uncertain = true
-		// Only A is asked: after B there is nowhere left to switch to.
-		if step.name == "a" {
-			if id, found := s.checkStatus(parent, log, n, step.provider); found {
-				return outcome{state: domain.StateAccepted, provider: step.provider.Name(), messageID: id}
+		if i < len(chain)-1 {
+			if id, found := s.checkStatus(parent, log, n, route.Provider); found {
+				return outcome{state: domain.StateAccepted, provider: name, messageID: id}
 			}
 		}
 	}
 
-	if len(reasons) == 0 {
-		return outcome{state: domain.StateFailed, reason: "no provider for channel " + string(n.Channel)}
-	}
 	reason := strings.Join(reasons, "; ")
 	if uncertain {
 		return outcome{state: domain.StateUnresolved, reason: reason}
@@ -123,18 +118,18 @@ func (s *Sender) deliver(ctx context.Context, log *slog.Logger, n domain.Notific
 }
 
 // attempt makes one provider call under its own timeout and logs how it ended.
-func (s *Sender) attempt(ctx context.Context, log *slog.Logger, n domain.Notification, slot string, p ports.Provider, timeout time.Duration) (string, error) {
-	callCtx, cancel := context.WithTimeout(ctx, timeout)
+func (s *Sender) attempt(ctx context.Context, log *slog.Logger, n domain.Notification, position int, route Route) (string, error) {
+	callCtx, cancel := context.WithTimeout(ctx, route.Timeout)
 	defer cancel()
 	start := time.Now()
-	id, err := p.Send(callCtx, n)
+	id, err := route.Provider.Send(callCtx, n)
 
 	k := kindOf(err)
 	level := slog.LevelInfo
 	if err != nil {
 		level = slog.LevelWarn
 	}
-	attrs := []any{"slot", slot, "provider", p.Name(), "outcome", string(k), "duration", time.Since(start)}
+	attrs := []any{"attempt", position, "provider", route.Provider.Name(), "outcome", string(k), "duration", time.Since(start)}
 	if err != nil {
 		attrs = append(attrs, "error", err)
 	}

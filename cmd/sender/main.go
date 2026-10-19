@@ -11,12 +11,10 @@ import (
 	"time"
 
 	"github.com/mansonxasthur/eshaar/internal/adapters/kafka"
-	"github.com/mansonxasthur/eshaar/internal/adapters/mock"
 	"github.com/mansonxasthur/eshaar/internal/adapters/postgres"
 	"github.com/mansonxasthur/eshaar/internal/domain"
 	"github.com/mansonxasthur/eshaar/internal/platform/config"
 	"github.com/mansonxasthur/eshaar/internal/platform/logging"
-	"github.com/mansonxasthur/eshaar/internal/ports"
 	"github.com/mansonxasthur/eshaar/internal/sender"
 )
 
@@ -35,41 +33,31 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, cfg, log, defaultProviders(cfg))
-}
-
-// defaultProviders gives every channel its own mock provider A and B, so one
-// channel's outage opens only that channel's breakers. Each is behind a circuit
-// breaker and, outside it, the outbound rate limit, so the limiter's own wait
-// errors never count against the breaker.
-func defaultProviders(cfg config.Config) map[domain.Channel]sender.Pair {
-	wrap := func(p ports.Provider) ports.Provider {
-		b := sender.WithBreaker(p, sender.BreakerConfig{FailureThreshold: cfg.BreakerFailures, OpenFor: cfg.BreakerOpenFor})
-		return sender.WithRateLimit(b, cfg.ProviderRateLimit)
+	specs, err := config.LoadProviders(cfg.ProvidersFile, os.Getenv)
+	if err != nil {
+		return err
 	}
-	providers := make(map[domain.Channel]sender.Pair)
-	for _, c := range domain.Channels() {
-		providers[c] = sender.Pair{A: wrap(mock.NewProvider("mock-a")), B: wrap(mock.NewProvider("mock-b"))}
+	routes, err := buildRoutes(specs)
+	if err != nil {
+		return err
 	}
-	return providers
+	return serve(ctx, cfg, log, routes)
 }
 
 // senderConfig maps the process configuration to the sender's.
 func senderConfig(cfg config.Config) sender.Config {
 	return sender.Config{
-		PoolSize:         cfg.SenderPoolSize,
-		SendTimeout:      cfg.SenderSendTimeout,
-		ProviderATimeout: cfg.ProviderATimeout,
-		ProviderBTimeout: cfg.ProviderBTimeout,
-		StatusTimeout:    cfg.ProviderStatusTimeout,
-		DrainTimeout:     cfg.SenderSendTimeout + 5*time.Second,
-		MinBackoff:       100 * time.Millisecond,
-		MaxBackoff:       5 * time.Second,
+		PoolSize:      cfg.SenderPoolSize,
+		SendTimeout:   cfg.SenderSendTimeout,
+		StatusTimeout: cfg.ProviderStatusTimeout,
+		DrainTimeout:  cfg.SenderSendTimeout + 5*time.Second,
+		MinBackoff:    100 * time.Millisecond,
+		MaxBackoff:    5 * time.Second,
 	}
 }
 
 // serve wires the adapters to the sender and runs it until ctx is done.
-func serve(ctx context.Context, cfg config.Config, log *slog.Logger, providers map[domain.Channel]sender.Pair) error {
+func serve(ctx context.Context, cfg config.Config, log *slog.Logger, providers map[domain.Channel][]sender.Route) error {
 	store, err := postgres.NewStore(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err

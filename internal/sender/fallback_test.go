@@ -57,23 +57,30 @@ var (
 func fallbackConfig() Config {
 	cfg := testConfig()
 	cfg.SendTimeout = time.Second
-	cfg.ProviderATimeout = 500 * time.Millisecond
-	cfg.ProviderBTimeout = 500 * time.Millisecond
 	cfg.StatusTimeout = 100 * time.Millisecond
 	return cfg
 }
 
-func deliver(cfg Config, pair Pair) outcome {
+// chain makes a fallback chain whose calls each have the same generous timeout.
+func chain(providers ...ports.Provider) []Route {
+	var routes []Route
+	for _, p := range providers {
+		routes = append(routes, Route{Provider: p, Timeout: 500 * time.Millisecond})
+	}
+	return routes
+}
+
+func deliver(cfg Config, chain []Route) outcome {
 	s := &Sender{cfg: cfg}
 	n := domain.Notification{ID: "id1", IdempotencyKey: "k1", Channel: domain.ChannelSMS}
-	return s.deliver(context.Background(), slog.New(slog.DiscardHandler), n, pair)
+	return s.deliver(context.Background(), slog.New(slog.DiscardHandler), n, chain)
 }
 
 func TestFallbackSwitchesToBOnFailure(t *testing.T) {
 	for name, err := range map[string]error{"transient": errDown, "rejected": errRejected, "unclassified": errors.New("boom")} {
 		t.Run(name, func(t *testing.T) {
 			a, b := &stub{name: "a", send: fails(err)}, &stub{name: "b", send: accepts("b-1")}
-			out := deliver(fallbackConfig(), Pair{A: a, B: b})
+			out := deliver(fallbackConfig(), chain(a, b))
 			if out.state != domain.StateAccepted || out.provider != "b" || out.messageID != "b-1" {
 				t.Errorf("outcome = %+v", out)
 			}
@@ -86,7 +93,7 @@ func TestFallbackSwitchesToBOnFailure(t *testing.T) {
 
 func TestFallbackAAccepts(t *testing.T) {
 	a, b := &stub{name: "a", send: accepts("a-1")}, &stub{name: "b", send: accepts("b-1")}
-	out := deliver(fallbackConfig(), Pair{A: a, B: b})
+	out := deliver(fallbackConfig(), chain(a, b))
 	if out.state != domain.StateAccepted || out.provider != "a" || b.calls.Load() != 0 {
 		t.Errorf("outcome = %+v, B calls %d", out, b.calls.Load())
 	}
@@ -94,7 +101,7 @@ func TestFallbackAAccepts(t *testing.T) {
 
 func TestFallbackRateLimitSwitchesWithoutRetry(t *testing.T) {
 	a, b := &stub{name: "a", send: fails(errRateLimit)}, &stub{name: "b", send: accepts("b-1")}
-	out := deliver(fallbackConfig(), Pair{A: a, B: b})
+	out := deliver(fallbackConfig(), chain(a, b))
 	if out.state != domain.StateAccepted || out.provider != "b" {
 		t.Errorf("outcome = %+v", out)
 	}
@@ -112,7 +119,7 @@ func TestFallbackTimeoutWithPositiveStatusCheckAcceptsA(t *testing.T) {
 		return "a-7", true, nil
 	}
 	b := &stub{name: "b", send: accepts("b-1")}
-	out := deliver(fallbackConfig(), Pair{A: a, B: b})
+	out := deliver(fallbackConfig(), chain(a, b))
 	if out.state != domain.StateAccepted || out.provider != "a" || out.messageID != "a-7" {
 		t.Errorf("outcome = %+v", out)
 	}
@@ -130,7 +137,7 @@ func TestFallbackTimeoutWithNegativeOrFailedStatusCheckSwitchesToB(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			a := &checking{stub: &stub{name: "a", send: fails(errTimeout)}, status: status}
 			b := &stub{name: "b", send: accepts("b-1")}
-			out := deliver(fallbackConfig(), Pair{A: a, B: b})
+			out := deliver(fallbackConfig(), chain(a, b))
 			if out.state != domain.StateAccepted || out.provider != "b" {
 				t.Errorf("outcome = %+v", out)
 			}
@@ -143,7 +150,7 @@ func TestFallbackTimeoutWithNegativeOrFailedStatusCheckSwitchesToB(t *testing.T)
 
 func TestFallbackTimeoutWithNoStatusCheckSwitchesToB(t *testing.T) {
 	a, b := &stub{name: "a", send: fails(errTimeout)}, &stub{name: "b", send: accepts("b-1")}
-	out := deliver(fallbackConfig(), Pair{A: a, B: b})
+	out := deliver(fallbackConfig(), chain(a, b))
 	if out.state != domain.StateAccepted || out.provider != "b" {
 		t.Errorf("outcome = %+v", out)
 	}
@@ -159,7 +166,7 @@ func TestFallbackStatusCheckHasItsOwnTimeout(t *testing.T) {
 	cfg.StatusTimeout = 20 * time.Millisecond
 	b := &stub{name: "b", send: accepts("b-1")}
 	start := time.Now()
-	out := deliver(cfg, Pair{A: a, B: b})
+	out := deliver(cfg, chain(a, b))
 	if out.provider != "b" || time.Since(start) > 400*time.Millisecond {
 		t.Errorf("outcome = %+v after %v", out, time.Since(start))
 	}
@@ -169,7 +176,7 @@ func TestFallbackOpenBreakerSwitchesWithoutStatusCheck(t *testing.T) {
 	a := &checking{stub: &stub{name: "a", send: fails(ErrCircuitOpen)}}
 	a.status = func(context.Context, string, domain.Channel) (string, bool, error) { return "x", true, nil }
 	b := &stub{name: "b", send: accepts("b-1")}
-	out := deliver(fallbackConfig(), Pair{A: a, B: b})
+	out := deliver(fallbackConfig(), chain(a, b))
 	if out.provider != "b" || a.checks.Load() != 0 {
 		t.Errorf("outcome = %+v, status checks %d", out, a.checks.Load())
 	}
@@ -190,7 +197,7 @@ func TestFallbackNothingAcceptedOutcomes(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			out := deliver(fallbackConfig(), Pair{A: &stub{name: "a", send: fails(c.a)}, B: &stub{name: "b", send: fails(c.b)}})
+			out := deliver(fallbackConfig(), chain(&stub{name: "a", send: fails(c.a)}, &stub{name: "b", send: fails(c.b)}))
 			if out.state != c.want {
 				t.Errorf("state = %s, want %s", out.state, c.want)
 			}
@@ -202,32 +209,30 @@ func TestFallbackNothingAcceptedOutcomes(t *testing.T) {
 }
 
 func TestFallbackWithoutBHasNoFallback(t *testing.T) {
-	out := deliver(fallbackConfig(), Pair{A: &stub{name: "a", send: fails(errDown)}})
+	out := deliver(fallbackConfig(), chain(&stub{name: "a", send: fails(errDown)}))
 	if out.state != domain.StateFailed {
 		t.Errorf("outcome = %+v", out)
 	}
-	out = deliver(fallbackConfig(), Pair{A: &stub{name: "a", send: fails(errTimeout)}})
+	out = deliver(fallbackConfig(), chain(&stub{name: "a", send: fails(errTimeout)}))
 	if out.state != domain.StateUnresolved {
 		t.Errorf("outcome = %+v", out)
 	}
 }
 
 func TestFallbackNoProviderFails(t *testing.T) {
-	out := deliver(fallbackConfig(), Pair{})
+	out := deliver(fallbackConfig(), nil)
 	if out.state != domain.StateFailed || !strings.Contains(out.reason, "no provider") {
 		t.Errorf("outcome = %+v", out)
 	}
 }
 
 func TestFallbackProviderTimeoutIsPerProvider(t *testing.T) {
-	cfg := fallbackConfig()
-	cfg.ProviderATimeout = 20 * time.Millisecond
 	a := &stub{name: "a", send: func(ctx context.Context, _ domain.Notification) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}}
 	b := &stub{name: "b", send: accepts("b-1")}
-	out := deliver(cfg, Pair{A: a, B: b})
+	out := deliver(fallbackConfig(), []Route{{Provider: a, Timeout: 20 * time.Millisecond}, {Provider: b, Timeout: time.Second}})
 	if out.state != domain.StateAccepted || out.provider != "b" {
 		t.Errorf("outcome = %+v", out)
 	}
@@ -241,7 +246,7 @@ func TestFallbackOverallDeadlineLeavesNoTimeForB(t *testing.T) {
 		return "", ctx.Err()
 	}}
 	b := &stub{name: "b", send: accepts("b-1")}
-	out := deliver(cfg, Pair{A: a, B: b})
+	out := deliver(cfg, chain(a, b))
 	if out.state != domain.StateUnresolved || b.calls.Load() != 0 {
 		t.Errorf("outcome = %+v, B calls %d", out, b.calls.Load())
 	}
@@ -255,7 +260,7 @@ func TestFallbackRejectedThenNoTimeIsFailed(t *testing.T) {
 		return "", errRejected
 	}}
 	b := &stub{name: "b", send: accepts("b-1")}
-	out := deliver(cfg, Pair{A: a, B: b})
+	out := deliver(cfg, chain(a, b))
 	if out.state != domain.StateFailed || b.calls.Load() != 0 {
 		t.Errorf("outcome = %+v, B calls %d", out, b.calls.Load())
 	}
@@ -269,7 +274,7 @@ func TestFallbackStatusCheckRunsAfterTheSendDeadline(t *testing.T) {
 		return "", ctx.Err()
 	}}}
 	a.status = func(context.Context, string, domain.Channel) (string, bool, error) { return "a-7", true, nil }
-	out := deliver(cfg, Pair{A: a, B: &stub{name: "b", send: accepts("b-1")}})
+	out := deliver(cfg, chain(a, &stub{name: "b", send: accepts("b-1")}))
 	if out.state != domain.StateAccepted || out.messageID != "a-7" {
 		t.Errorf("outcome = %+v", out)
 	}
@@ -278,11 +283,48 @@ func TestFallbackStatusCheckRunsAfterTheSendDeadline(t *testing.T) {
 func TestFallbackRateLimitWaitIsNotATimeout(t *testing.T) {
 	a := WithRateLimit(&stub{name: "a", send: accepts("a-1")}, 1)
 	_, _ = a.Send(context.Background(), domain.Notification{}) // use the burst
-	cfg := fallbackConfig()
-	cfg.ProviderATimeout = 10 * time.Millisecond
 	b := &stub{name: "b", send: accepts("b-1")}
-	out := deliver(cfg, Pair{A: a, B: b})
+	out := deliver(fallbackConfig(), []Route{{Provider: a, Timeout: 10 * time.Millisecond}, {Provider: b, Timeout: time.Second}})
 	if out.state != domain.StateAccepted || out.provider != "b" {
 		t.Errorf("outcome = %+v", out)
+	}
+}
+
+func TestFallbackWalksAChainOfThree(t *testing.T) {
+	a := &checking{stub: &stub{name: "a", send: fails(errTimeout)}}
+	a.status = func(context.Context, string, domain.Channel) (string, bool, error) { return "", false, nil }
+	b := &stub{name: "b", send: fails(errRateLimit)}
+	c := &stub{name: "c", send: accepts("c-1")}
+	out := deliver(fallbackConfig(), chain(a, b, c))
+	if out.state != domain.StateAccepted || out.provider != "c" || out.messageID != "c-1" {
+		t.Errorf("outcome = %+v", out)
+	}
+	if a.checks.Load() != 1 {
+		t.Errorf("A status checked %d times, want 1", a.checks.Load())
+	}
+}
+
+func TestFallbackChecksStatusOfEveryProviderButTheLast(t *testing.T) {
+	newChecking := func(name string, found bool) *checking {
+		p := &checking{stub: &stub{name: name, send: fails(errTimeout)}}
+		p.status = func(context.Context, string, domain.Channel) (string, bool, error) {
+			return name + "-9", found, nil
+		}
+		return p
+	}
+	a, b, c := newChecking("a", false), newChecking("b", true), newChecking("c", true)
+	out := deliver(fallbackConfig(), chain(a, b, c))
+	if out.provider != "b" || out.messageID != "b-9" {
+		t.Errorf("outcome = %+v, want accepted by B's status check", out)
+	}
+	if c.calls.Load() != 0 {
+		t.Error("C was called although B had taken the message")
+	}
+
+	// Everything times out: the last provider is not asked, so it stays unresolved.
+	a, b, c = newChecking("a", false), newChecking("b", false), newChecking("c", true)
+	out = deliver(fallbackConfig(), chain(a, b, c))
+	if out.state != domain.StateUnresolved || c.checks.Load() != 0 {
+		t.Errorf("outcome = %+v, C checks %d", out, c.checks.Load())
 	}
 }

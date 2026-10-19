@@ -90,9 +90,7 @@ func (e env) createTopic(t *testing.T, topic string) {
 func (e env) config(topic string) config.Config {
 	return config.Config{
 		DatabaseURL: e.dbURL, KafkaBrokers: e.brokers, KafkaTopic: topic, KafkaGroupID: "sender-" + topic,
-		SenderPoolSize: 8, SenderBatchSize: 100, SenderSendTimeout: 3 * time.Second, ProviderRateLimit: 1000,
-		ProviderATimeout: time.Second, ProviderBTimeout: time.Second, ProviderStatusTimeout: 500 * time.Millisecond,
-		BreakerFailures: 5, BreakerOpenFor: 30 * time.Second,
+		SenderPoolSize: 8, SenderBatchSize: 100, SenderSendTimeout: 3 * time.Second, ProviderStatusTimeout: 500 * time.Millisecond,
 	}
 }
 
@@ -172,9 +170,9 @@ func TestMessageToRowsAndSends(t *testing.T) {
 	e.createTopic(t, topic)
 
 	provider := mock.NewProvider("mock")
-	providers := map[domain.Channel]sender.Pair{}
+	providers := map[domain.Channel][]sender.Route{}
 	for _, c := range domain.Channels() {
-		providers[c] = sender.Pair{A: provider}
+		providers[c] = []sender.Route{{Provider: provider, Timeout: time.Second}}
 	}
 	stop := start(t, func(ctx context.Context) error {
 		return serve(ctx, e.config(topic), slog.New(slog.DiscardHandler), providers)
@@ -271,9 +269,9 @@ func TestFailedInsertIsRedeliveredNotLost(t *testing.T) {
 	defer consumer.Close()
 
 	provider := mock.NewProvider("mock")
-	providers := map[domain.Channel]sender.Pair{}
+	providers := map[domain.Channel][]sender.Route{}
 	for _, c := range domain.Channels() {
-		providers[c] = sender.Pair{A: provider}
+		providers[c] = []sender.Route{{Provider: provider, Timeout: time.Second}}
 	}
 	s, err := sender.New(consumer, store, providers, senderConfig(cfg), log)
 	if err != nil {

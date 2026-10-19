@@ -27,13 +27,9 @@ const (
 	EnvSenderPoolSize    = "SENDER_POOL_SIZE"
 	EnvSenderBatchSize   = "SENDER_BATCH_SIZE"
 	EnvSenderSendTimeout = "SENDER_SEND_TIMEOUT"
-	EnvProviderRateLimit = "PROVIDER_RATE_LIMIT_RPS"
+	EnvProvidersFile     = "PROVIDERS_CONFIG"
 
-	EnvProviderATimeout      = "PROVIDER_A_TIMEOUT"
-	EnvProviderBTimeout      = "PROVIDER_B_TIMEOUT"
 	EnvProviderStatusTimeout = "PROVIDER_STATUS_TIMEOUT"
-	EnvBreakerFailures       = "PROVIDER_BREAKER_FAILURES"
-	EnvBreakerOpenFor        = "PROVIDER_BREAKER_OPEN_FOR"
 )
 
 // Need selects the settings a process requires. Settings a process does not
@@ -64,14 +60,10 @@ type Config struct {
 	KafkaGroupID      string        // consumer group the senders join
 	SenderPoolSize    int           // concurrent channel sends per sender
 	SenderBatchSize   int           // most records read per poll
-	SenderSendTimeout time.Duration // limit for a whole channel send, across both providers
-	ProviderRateLimit float64       // provider calls per second per sender
+	SenderSendTimeout time.Duration // limit for a whole channel send, across all its providers
 
-	ProviderATimeout      time.Duration // limit for one call to provider A
-	ProviderBTimeout      time.Duration // limit for one call to provider B
-	ProviderStatusTimeout time.Duration // limit for the status check after A times out
-	BreakerFailures       int           // consecutive failures that open a provider's circuit breaker
-	BreakerOpenFor        time.Duration // how long an open breaker waits before probing
+	ProvidersFile         string        // YAML file listing each channel's providers and their policies
+	ProviderStatusTimeout time.Duration // limit for the status check after a provider times out
 }
 
 // Load reads the configuration through getenv (os.Getenv in production) and
@@ -116,22 +108,13 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 			def  string
 		}{
 			{&cfg.SenderSendTimeout, EnvSenderSendTimeout, "4500ms"},
-			{&cfg.ProviderATimeout, EnvProviderATimeout, "2s"},
-			{&cfg.ProviderBTimeout, EnvProviderBTimeout, "2s"},
 			{&cfg.ProviderStatusTimeout, EnvProviderStatusTimeout, "500ms"},
-			{&cfg.BreakerOpenFor, EnvBreakerOpenFor, "30s"},
 		} {
 			if *d.dst, err = positiveDuration(getenv, d.name, d.def); err != nil {
 				errs = append(errs, err)
 			}
 		}
-		if cfg.BreakerFailures, err = positiveInt(getenv, EnvBreakerFailures, "5"); err != nil {
-			errs = append(errs, err)
-		}
-		cfg.ProviderRateLimit, err = strconv.ParseFloat(valueOr(getenv(EnvProviderRateLimit), "1000"), 64)
-		if err != nil || math.IsNaN(cfg.ProviderRateLimit) || math.IsInf(cfg.ProviderRateLimit, 0) || cfg.ProviderRateLimit <= 0 {
-			errs = append(errs, fmt.Errorf("%s must be a positive number", EnvProviderRateLimit))
-		}
+		cfg.ProvidersFile = valueOr(getenv(EnvProvidersFile), "infra/providers.yaml")
 	}
 	if need&NeedDatabase != 0 {
 		errs = append(errs, checkDatabaseURL(cfg.DatabaseURL))
