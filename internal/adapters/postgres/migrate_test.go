@@ -63,8 +63,8 @@ func newDBWithURL(t *testing.T) (*pgx.Conn, string) {
 
 func requireUniqueViolation(t *testing.T, err error, constraint string) {
 	t.Helper()
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != uniqueViolation || pgErr.ConstraintName != constraint {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok || pgErr.Code != uniqueViolation || pgErr.ConstraintName != constraint {
 		t.Fatalf("err = %v, want unique violation on %s", err, constraint)
 	}
 }
@@ -92,8 +92,8 @@ func TestNotificationsUniqueOnIdempotencyKeyAndChannel(t *testing.T) {
 
 func requireCheckViolation(t *testing.T, err error, constraint string) {
 	t.Helper()
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != checkViolation || pgErr.ConstraintName != constraint {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok || pgErr.Code != checkViolation || pgErr.ConstraintName != constraint {
 		t.Fatalf("err = %v, want check violation %s", err, constraint)
 	}
 }

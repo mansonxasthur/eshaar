@@ -90,8 +90,8 @@ func TestRequestValidate(t *testing.T) {
 				}
 				return
 			}
-			var ve *ValidationError
-			if !errors.As(err, &ve) {
+			ve, ok := errors.AsType[*ValidationError](err)
+			if !ok {
 				t.Fatalf("Validate() = %v, want *ValidationError", err)
 			}
 			got := map[string]int{}
