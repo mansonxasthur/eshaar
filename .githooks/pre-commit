@@ -1,0 +1,3 @@
+#!/bin/sh
+# Verify the code (fmt, vet, golangci-lint, test) before every commit.
+exec make verify
