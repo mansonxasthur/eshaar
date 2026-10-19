@@ -1,5 +1,10 @@
 # Local environment: Postgres and a single-node Kafka (KRaft, no ZooKeeper).
 # Start with `make up`. Host ports: Postgres 5432, Kafka 9092.
+#
+# The `stack` profile (`make stack-up`) adds the five Eshaar processes for the
+# load test: dispatcher on host port 8080, webhook on 8081. Tune the run with
+# the variables below (rate limit, pool size, provider latency and error rate)
+# from the shell or an .env file.
 services:
   postgres:
     image: postgres:16-alpine
@@ -65,6 +70,98 @@ services:
       - ${KAFKA_PARTITIONS:-12}
       - --replication-factor
       - "1"
+
+  # Eshaar processes, started only with the `stack` profile.
+  migrate:
+    profiles: [stack]
+    image: eshaar:local
+    build: {context: .., dockerfile: infra/Dockerfile}
+    command: [migrate]
+    environment: &db
+      DATABASE_URL: postgres://eshaar:eshaar@postgres:5432/eshaar?sslmode=disable
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  dispatcher:
+    profiles: [stack]
+    image: eshaar:local
+    command: [dispatcher]
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      KAFKA_BROKERS: kafka:19092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-notifications}
+      HTTP_ADDR: ":8080"
+      DISPATCHER_API_KEYS: ${DISPATCHER_API_KEYS:-loadtest-1,loadtest-2,loadtest-3,loadtest-4}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-1000000}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-1000000}
+    depends_on:
+      migrate: {condition: service_completed_successfully} # builds the shared image first
+      kafka-init: {condition: service_completed_successfully}
+
+  sender:
+    profiles: [stack]
+    image: eshaar:local
+    command: [sender]
+    environment: &providers
+      <<: *db
+      KAFKA_BROKERS: kafka:19092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-notifications}
+      PROVIDERS_CONFIG: /etc/eshaar/providers.yaml
+      SENDER_POOL_SIZE: ${SENDER_POOL_SIZE:-256}
+      SENDER_BATCH_SIZE: ${SENDER_BATCH_SIZE:-500}
+      SMS_A_LATENCY: ${SMS_A_LATENCY:-0s}
+      SMS_A_ERROR_RATE: ${SMS_A_ERROR_RATE:-0}
+      SMS_A_TIMEOUT: ${SMS_A_TIMEOUT:-2s}
+      SMS_A_RPS: ${SMS_A_RPS:-${PROVIDER_RPS:-100000}}
+      SMS_B_LATENCY: ${SMS_B_LATENCY:-0s}
+      SMS_B_ERROR_RATE: ${SMS_B_ERROR_RATE:-0}
+      SMS_B_TIMEOUT: ${SMS_B_TIMEOUT:-2s}
+      SMS_B_RPS: ${SMS_B_RPS:-${PROVIDER_RPS:-100000}}
+      EMAIL_A_LATENCY: ${EMAIL_A_LATENCY:-0s}
+      EMAIL_A_ERROR_RATE: ${EMAIL_A_ERROR_RATE:-0}
+      EMAIL_A_TIMEOUT: ${EMAIL_A_TIMEOUT:-2s}
+      EMAIL_A_RPS: ${EMAIL_A_RPS:-${PROVIDER_RPS:-100000}}
+      EMAIL_B_LATENCY: ${EMAIL_B_LATENCY:-0s}
+      EMAIL_B_ERROR_RATE: ${EMAIL_B_ERROR_RATE:-0}
+      EMAIL_B_TIMEOUT: ${EMAIL_B_TIMEOUT:-2s}
+      EMAIL_B_RPS: ${EMAIL_B_RPS:-${PROVIDER_RPS:-100000}}
+      WHATSAPP_A_LATENCY: ${WHATSAPP_A_LATENCY:-0s}
+      WHATSAPP_A_ERROR_RATE: ${WHATSAPP_A_ERROR_RATE:-0}
+      WHATSAPP_A_TIMEOUT: ${WHATSAPP_A_TIMEOUT:-2s}
+      WHATSAPP_A_RPS: ${WHATSAPP_A_RPS:-${PROVIDER_RPS:-100000}}
+      WHATSAPP_B_LATENCY: ${WHATSAPP_B_LATENCY:-0s}
+      WHATSAPP_B_ERROR_RATE: ${WHATSAPP_B_ERROR_RATE:-0}
+      WHATSAPP_B_TIMEOUT: ${WHATSAPP_B_TIMEOUT:-2s}
+      WHATSAPP_B_RPS: ${WHATSAPP_B_RPS:-${PROVIDER_RPS:-100000}}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      kafka-init: {condition: service_completed_successfully}
+
+  webhook:
+    profiles: [stack]
+    image: eshaar:local
+    command: [webhook]
+    ports: ["127.0.0.1:8081:8080"]
+    environment:
+      <<: *providers
+      HTTP_ADDR: ":8080"
+      SMS_A_WEBHOOK_SECRET: loadtest-secret-sms-a
+      SMS_B_WEBHOOK_SECRET: loadtest-secret-sms-b
+      EMAIL_A_WEBHOOK_SECRET: loadtest-secret-email-a
+      EMAIL_B_WEBHOOK_SECRET: loadtest-secret-email-b
+      WHATSAPP_A_WEBHOOK_SECRET: loadtest-secret-wa-a
+      WHATSAPP_B_WEBHOOK_SECRET: loadtest-secret-wa-b
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  janitor:
+    profiles: [stack]
+    image: eshaar:local
+    command: [janitor]
+    environment: *providers
+    depends_on:
+      migrate: {condition: service_completed_successfully}
 
 volumes:
   postgres-data:

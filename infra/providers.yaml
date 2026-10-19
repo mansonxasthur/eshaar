@@ -16,6 +16,11 @@
 # breaker.failures consecutive transient errors or timeouts open it for
 # breaker.open_for, after which one probe call decides whether it closes.
 #
+# mock (mock kind only) makes a provider slow or flaky for the load test:
+# latency is how long every call takes (above timeout it always times out) and
+# error_rate is the share of calls, 0 to 1, that fail with a transient error.
+# The defaults answer at once and never fail.
+#
 # webhook_secret is the key the provider signs its webhooks with (at least 16
 # characters of letters, digits and . _ + -). Only the webhook process reads it,
 # and a provider with an empty one cannot deliver webhooks. It is empty here so
@@ -27,6 +32,7 @@ sms:
     rps: ${SMS_A_RPS:-1000}
     timeout: ${SMS_A_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    mock: {latency: ${SMS_A_LATENCY:-0s}, error_rate: ${SMS_A_ERROR_RATE:-0}}
     webhook_secret: "${SMS_A_WEBHOOK_SECRET:-}"
   - name: sms-b
     kind: mock
@@ -34,6 +40,7 @@ sms:
     rps: ${SMS_B_RPS:-1000}
     timeout: ${SMS_B_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    mock: {latency: ${SMS_B_LATENCY:-0s}, error_rate: ${SMS_B_ERROR_RATE:-0}}
     webhook_secret: "${SMS_B_WEBHOOK_SECRET:-}"
 email:
   - name: email-a
@@ -42,6 +49,7 @@ email:
     rps: ${EMAIL_A_RPS:-1000}
     timeout: ${EMAIL_A_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    mock: {latency: ${EMAIL_A_LATENCY:-0s}, error_rate: ${EMAIL_A_ERROR_RATE:-0}}
     webhook_secret: "${EMAIL_A_WEBHOOK_SECRET:-}"
   - name: email-b
     kind: mock
@@ -49,6 +57,7 @@ email:
     rps: ${EMAIL_B_RPS:-1000}
     timeout: ${EMAIL_B_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    mock: {latency: ${EMAIL_B_LATENCY:-0s}, error_rate: ${EMAIL_B_ERROR_RATE:-0}}
     webhook_secret: "${EMAIL_B_WEBHOOK_SECRET:-}"
 whatsapp:
   - name: whatsapp-a
@@ -57,6 +66,7 @@ whatsapp:
     rps: ${WHATSAPP_A_RPS:-1000}
     timeout: ${WHATSAPP_A_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    mock: {latency: ${WHATSAPP_A_LATENCY:-0s}, error_rate: ${WHATSAPP_A_ERROR_RATE:-0}}
     webhook_secret: "${WHATSAPP_A_WEBHOOK_SECRET:-}"
   - name: whatsapp-b
     kind: mock
@@ -64,4 +74,5 @@ whatsapp:
     rps: ${WHATSAPP_B_RPS:-1000}
     timeout: ${WHATSAPP_B_TIMEOUT:-2s}
     breaker: {failures: 5, open_for: 30s}
+    mock: {latency: ${WHATSAPP_B_LATENCY:-0s}, error_rate: ${WHATSAPP_B_ERROR_RATE:-0}}
     webhook_secret: "${WHATSAPP_B_WEBHOOK_SECRET:-}"

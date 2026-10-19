@@ -64,7 +64,7 @@ func newProvider(spec config.Provider) (ports.Provider, error) {
 	var p ports.Provider
 	switch spec.Kind {
 	case "", "mock":
-		p = mock.NewProvider(spec.Name)
+		p = mock.NewProvider(spec.Name, mock.WithDelay(spec.Mock.Latency), mock.WithErrorRate(spec.Mock.ErrorRate))
 	default:
 		return nil, fmt.Errorf("provider %s: unknown kind %q", spec.Name, spec.Kind)
 	}

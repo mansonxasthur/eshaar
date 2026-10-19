@@ -244,3 +244,26 @@ func TestExpiredContextIsNotServed(t *testing.T) {
 		t.Errorf("status err = %v, want canceled", err)
 	}
 }
+
+func TestWithErrorRateFailsTransientlyAtTheGivenShare(t *testing.T) {
+	always := NewProvider("mock", WithErrorRate(1))
+	if _, err := always.Send(context.Background(), domain.Notification{}); !errors.Is(err, ports.ErrTransient) {
+		t.Fatalf("rate 1: err = %v", err)
+	}
+	never := NewProvider("mock", WithErrorRate(0))
+	for range 50 {
+		if _, err := never.Send(context.Background(), domain.Notification{}); err != nil {
+			t.Fatalf("rate 0: err = %v", err)
+		}
+	}
+	half := NewProvider("mock", WithErrorRate(0.5))
+	failed := 0
+	for range 2000 {
+		if _, err := half.Send(context.Background(), domain.Notification{}); errors.Is(err, ports.ErrTransient) {
+			failed++
+		}
+	}
+	if failed < 800 || failed > 1200 {
+		t.Errorf("rate 0.5 failed %d of 2000", failed)
+	}
+}
