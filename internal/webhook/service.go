@@ -50,7 +50,7 @@ type Service struct {
 	exited  chan struct{} // closed once the flushers have drained and returned
 	started atomic.Bool
 
-	refused, invalid throttle // log limits for unauthenticated and malformed events
+	refused, invalid, wrongChannel throttle // log limits for unauthenticated, malformed and misrouted events
 }
 
 var _ ports.EventReceiver = (*Service)(nil)
@@ -135,7 +135,9 @@ func (s *Service) Receive(ctx context.Context, provider string, body []byte, sig
 		return err
 	}
 	if !s.channels[provider][ev.Channel] {
-		s.log.WarnContext(ctx, "webhook event names a channel the provider does not serve", "provider", provider, "channel", ev.Channel)
+		if ok, skipped := s.wrongChannel.allow(time.Now()); ok {
+			s.log.WarnContext(ctx, "webhook event names a channel the provider does not serve", "provider", provider, "channel", ev.Channel, "suppressed", skipped)
+		}
 		return invalid("channel is not one this provider serves")
 	}
 

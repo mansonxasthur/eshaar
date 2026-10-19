@@ -2,7 +2,9 @@ package mock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,11 +133,100 @@ func TestLateFailureIsReportedAfterAccepting(t *testing.T) {
 	}
 	select {
 	case e := <-events:
-		if e.MessageID != id || e.IdempotencyKey != "k1" || e.Channel != domain.ChannelEmail || e.Status != domain.StateFailed || e.Provider != "mock" {
+		if e.MessageID != id || e.IdempotencyKey != "k1" || e.Channel != domain.ChannelEmail || e.Status != domain.StateFailed || e.Provider != "mock" || e.Reason == "" || e.EventID == "" {
 			t.Errorf("event = %+v", e)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no event")
+	}
+}
+
+func TestLateDeliveryIsReportedAfterAccepting(t *testing.T) {
+	events := make(chan Event, 1)
+	p := NewProvider("mock", WithLateDelivery(0, func(e Event) { events <- e }))
+	id, err := p.Send(context.Background(), domain.Notification{IdempotencyKey: "k1", Channel: domain.ChannelSMS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case e := <-events:
+		if e.MessageID != id || e.Status != domain.StateDelivered || e.Reason != "" || e.Channel != domain.ChannelSMS {
+			t.Errorf("event = %+v", e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event")
+	}
+}
+
+func TestEventIDsAreUniquePerEvent(t *testing.T) {
+	events := make(chan Event, 3)
+	p := NewProvider("mock", WithLateDelivery(0, func(e Event) { events <- e }))
+	for _, k := range []string{"k1", "k2", "k3"} {
+		if _, err := p.Send(context.Background(), domain.Notification{IdempotencyKey: k, Channel: domain.ChannelSMS}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		select {
+		case e := <-events:
+			if seen[e.EventID] {
+				t.Errorf("event id %q repeated", e.EventID)
+			}
+			seen[e.EventID] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("missing event")
+		}
+	}
+}
+
+func TestIDsDoNotRepeatAfterARestart(t *testing.T) {
+	ids, events := map[string]bool{}, make(chan Event, 2)
+	for i := 0; i < 2; i++ { // two Providers of the same name, as before and after a restart
+		p := NewProvider("sms-a", WithLateDelivery(0, func(e Event) { events <- e }))
+		id, err := p.Send(context.Background(), domain.Notification{IdempotencyKey: "k", Channel: domain.ChannelSMS})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ids[id] {
+			t.Errorf("message id %q repeated", id)
+		}
+		ids[id] = true
+		select {
+		case e := <-events:
+			if ids[e.EventID] {
+				t.Errorf("event id %q repeated", e.EventID)
+			}
+			ids[e.EventID] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("no event")
+		}
+	}
+}
+
+func TestEventJSONCarriesEveryFieldTheEndpointReads(t *testing.T) {
+	e := Event{
+		Provider: "sms-a", EventID: "sms-a-evt-1", MessageID: "sms-a-1", IdempotencyKey: "k1",
+		Channel: domain.ChannelSMS, Status: domain.StateFailed, Reason: "الرقم غير صالح <x>",
+	}
+	var got map[string]string
+	if err := json.Unmarshal(e.JSON(), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"event_id": "sms-a-evt-1", "message_id": "sms-a-1", "idempotency_key": "k1",
+		"channel": "sms", "status": "failed", "reason": "الرقم غير صالح <x>",
+	}
+	if len(got) != len(want) {
+		t.Errorf("fields = %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+	if !strings.Contains(string(e.JSON()), "الرقم غير صالح") {
+		t.Errorf("Arabic was escaped: %s", e.JSON())
 	}
 }
 
