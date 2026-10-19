@@ -190,3 +190,9 @@ These topics are deliberately deferred and will be covered in the solution docum
 - **Load test results** and system behavior when a provider fails.
 - **PII:** contact details are stored per channel row, which is acceptable here but worth a note.
 - **Alternatives:** how the problem could be solved differently or better with more time or resources.
+
+## Configuration
+
+- Settings come from environment variables only (`DATABASE_URL`, `KAFKA_BROKERS`, `KAFKA_TOPIC`, `HTTP_ADDR`, `LOG_LEVEL`), which suits docker-compose and keeps secrets out of files.
+- One `Config` type is shared, but each process names what it needs (`NeedDatabase`, `NeedKafka`, `NeedHTTP`). Unneeded settings are neither required nor validated, so the janitor starts without Kafka and the dispatcher without Postgres.
+- `KAFKA_TOPIC` defaults to `notifications` and `HTTP_ADDR` to `:8080`. The database URL and brokers have no default, so a missing one fails at startup with every problem listed.
