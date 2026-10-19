@@ -33,6 +33,10 @@ type Provider struct {
 	Timeout  time.Duration `yaml:"timeout"`  // limit for one call to it
 	Breaker  Breaker       `yaml:"breaker"`
 
+	// Mock shapes the mock adapter and is ignored by other kinds. It exists
+	// so the load test can slow a provider down or make it fail.
+	Mock Mock `yaml:"mock"`
+
 	// WebhookSecret is the key the provider signs its webhooks with. It is
 	// optional: only cmd/webhook uses it (and checks its length), and a
 	// provider without one cannot deliver webhooks. Being set through a
@@ -73,6 +77,13 @@ func redacted(s Secret) string {
 type Breaker struct {
 	Failures int           `yaml:"failures"` // consecutive failures that open it
 	OpenFor  time.Duration `yaml:"open_for"` // how long it stays open before one probe
+}
+
+// Mock is how a mock provider behaves. The zero value answers at once and
+// never fails.
+type Mock struct {
+	Latency   time.Duration `yaml:"latency"`    // how long every call takes; above the provider's timeout it always times out
+	ErrorRate float64       `yaml:"error_rate"` // share of calls (0 to 1) that fail with a transient error
 }
 
 // LoadProviders reads the providers file at path. See ParseProviders.
@@ -202,6 +213,13 @@ func (p Providers) validate() error {
 			}
 			if pr.Timeout < minDuration {
 				errs = append(errs, fmt.Errorf("%s: timeout must be a duration of at least 1ms, with a unit such as 2s", at))
+			}
+			isMock := pr.Kind == "" || pr.Kind == "mock" // other kinds ignore the mock block
+			if isMock && pr.Mock.Latency < 0 {
+				errs = append(errs, fmt.Errorf("%s: mock.latency must not be negative", at))
+			}
+			if isMock && (pr.Mock.ErrorRate < 0 || pr.Mock.ErrorRate > 1 || math.IsNaN(pr.Mock.ErrorRate)) {
+				errs = append(errs, fmt.Errorf("%s: mock.error_rate must be between 0 and 1", at))
 			}
 			if pr.Breaker.Failures < 1 {
 				errs = append(errs, fmt.Errorf("%s: breaker.failures must be at least 1", at))
