@@ -56,6 +56,9 @@ func run(args []string, out io.Writer) error {
 		}
 		targets = append(targets, n)
 	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no rates")
+	}
 	var chans []string
 	for _, c := range splitList(*channels) {
 		chans = append(chans, strings.ToLower(c))

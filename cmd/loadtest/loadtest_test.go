@@ -104,6 +104,7 @@ func TestRunRejectsBadFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"-keys", ""},
 		{"-keys", "k", "-rates", "x"},
+		{"-keys", "k", "-rates", ","},
 		{"-keys", "k", "-channels", "fax"},
 		{"-keys", "k", "-channels", ","},
 		{"-keys", "k", "-workers", "0"},
