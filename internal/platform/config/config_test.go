@@ -92,3 +92,41 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadDispatcherSettings(t *testing.T) {
+	cfg, err := Load(env(map[string]string{EnvAPIKeys: "a, b,"}), NeedAPIKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a", "b"}; !reflect.DeepEqual(cfg.APIKeys, want) {
+		t.Errorf("keys = %v, want %v", cfg.APIKeys, want)
+	}
+	if cfg.RateLimitRPS != 1000 || cfg.RateLimitBurst != 2000 {
+		t.Errorf("rate limit defaults = %v/%d", cfg.RateLimitRPS, cfg.RateLimitBurst)
+	}
+
+	cfg, err = Load(env(map[string]string{EnvAPIKeys: "a", EnvRateLimitRPS: "2.5", EnvRateLimitBurst: "7"}), NeedAPIKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RateLimitRPS != 2.5 || cfg.RateLimitBurst != 7 {
+		t.Errorf("rate limit overrides = %v/%d", cfg.RateLimitRPS, cfg.RateLimitBurst)
+	}
+}
+
+func TestLoadDispatcherSettingsReportsEveryProblem(t *testing.T) {
+	for _, bad := range []string{"NaN", "Inf"} {
+		if _, err := Load(env(map[string]string{EnvAPIKeys: "a", EnvRateLimitRPS: bad}), NeedAPIKeys); err == nil {
+			t.Errorf("%s accepted as a rate", bad)
+		}
+	}
+	_, err := Load(env(map[string]string{EnvRateLimitRPS: "0", EnvRateLimitBurst: "x"}), NeedAPIKeys)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, name := range []string{EnvAPIKeys, EnvRateLimitRPS, EnvRateLimitBurst} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error does not mention %s: %v", name, err)
+		}
+	}
+}

@@ -72,7 +72,7 @@ type RateLimiter struct {
 // NewRateLimiter gives each of keys its own bucket: rps requests per second,
 // with bursts up to burst.
 func NewRateLimiter(keys []string, rps float64, burst int) (*RateLimiter, error) {
-	if rps <= 0 || burst < 1 {
+	if math.IsNaN(rps) || math.IsInf(rps, 0) || rps <= 0 || burst < 1 {
 		return nil, fmt.Errorf("rate limit: rps must be positive and burst at least 1 (got %v, %d)", rps, burst)
 	}
 	l := &RateLimiter{
