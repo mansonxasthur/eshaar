@@ -21,6 +21,8 @@ type Notification struct {
 	FailureReason     *string
 	Provider          *string // provider that accepted the send
 	ProviderMessageID *string
+	LastProvider      *string // last provider a send called on a row left pending
+	Attempts          int     // times the recovery janitor has claimed the row
 	AcceptedAt        *time.Time
 	ClaimedAt         *time.Time // set when the recovery janitor claims the row
 	CreatedAt         time.Time
