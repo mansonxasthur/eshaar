@@ -1,0 +1,71 @@
+# Local environment: Postgres and a single-node Kafka (KRaft, no ZooKeeper).
+# Start with `make up`. Host ports: Postgres 5432, Kafka 9092.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: eshaar
+      POSTGRES_PASSWORD: eshaar
+      POSTGRES_DB: eshaar
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eshaar -d eshaar"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:3.8.0
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      # INTERNAL is for containers on the compose network, EXTERNAL for the host.
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  # Creates the notifications topic once Kafka is healthy, then exits.
+  # Messages are keyed by idempotency_key, so partitions spread evenly.
+  # --if-not-exists keeps an existing topic as is: changing KAFKA_PARTITIONS
+  # needs `make down COMPOSE_DOWN_FLAGS=-v` first.
+  kafka-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - /opt/kafka/bin/kafka-topics.sh
+      - --bootstrap-server
+      - kafka:19092
+      - --create
+      - --if-not-exists
+      - --topic
+      - ${KAFKA_TOPIC:-notifications}
+      - --partitions
+      - ${KAFKA_PARTITIONS:-12}
+      - --replication-factor
+      - "1"
+
+volumes:
+  postgres-data:
+  kafka-data:

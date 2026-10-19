@@ -43,14 +43,15 @@ func (n *Notification) Transition(to State, now time.Time) error {
 }
 
 // Accept records that a provider accepted the send and moves the row to
-// accepted. The provider message ID is what webhooks use to find the row.
-func (n *Notification) Accept(providerMessageID string, now time.Time) error {
-	if providerMessageID == "" {
-		return errors.New("accept: empty provider message id")
+// accepted. Webhooks find the row by provider and provider message ID.
+func (n *Notification) Accept(provider, providerMessageID string, now time.Time) error {
+	if provider == "" || providerMessageID == "" {
+		return errors.New("accept: empty provider or provider message id")
 	}
 	if err := n.Transition(StateAccepted, now); err != nil {
 		return err
 	}
+	n.Provider = &provider
 	n.ProviderMessageID = &providerMessageID
 	return nil
 }

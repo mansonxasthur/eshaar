@@ -124,11 +124,14 @@ func TestAcceptAndFailRecordDetails(t *testing.T) {
 	now := time.Now()
 
 	n := &Notification{State: StatePending}
-	if err := n.Accept("", now); err == nil {
+	if err := n.Accept("a", "", now); err == nil {
 		t.Error("Accept with empty id should fail")
 	}
-	if err := n.Accept("msg-1", now); err != nil {
+	if err := n.Accept("provider-a", "msg-1", now); err != nil {
 		t.Fatal(err)
+	}
+	if n.Provider == nil || *n.Provider != "provider-a" {
+		t.Errorf("Provider = %v", n.Provider)
 	}
 	if n.ProviderMessageID == nil || *n.ProviderMessageID != "msg-1" {
 		t.Errorf("ProviderMessageID = %v", n.ProviderMessageID)

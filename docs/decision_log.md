@@ -219,3 +219,8 @@ These topics are deliberately deferred and will be covered in the solution docum
 | `webhook_events (created_at) WHERE notification_id IS NULL` | Re-resolving events that arrived before the accept |
 
 The janitor and sweeper indexes are partial, so they only hold the rows still waiting, not the whole table. They are split by `claimed_at` because each query filters on one side of it.
+
+## Local environment
+
+- `infra/docker-compose.yml` runs Postgres 16 and a single-node Kafka in KRaft mode, with `kafka-init` creating the topic (`KAFKA_TOPIC`, default `notifications`, `KAFKA_PARTITIONS`, default 12) and topic auto-creation off. Kafka advertises `localhost:9092` to the host and `kafka:19092` to other containers.
+- `make up`, `make down` and `make migrate` drive it. `make migrate` runs `cmd/migrate`, a small fifth entry point that applies the migrations and exits, so migrations are an explicit step and not a side effect of starting a service.

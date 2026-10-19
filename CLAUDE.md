@@ -33,6 +33,7 @@ Hexagonal. Import direction is enforced by convention, so check it in review:
 - `internal/ports`: interfaces for publishing, consuming, storing notifications and sending through a provider. Imports only the domain.
 - `internal/adapters`: Kafka, Postgres, mock provider, HTTP. Import ports and the domain, never each other.
 - `cmd/{dispatcher,sender,webhook,janitor}`: the only places that wire adapters to ports. Each is a separate process.
+- `cmd/migrate`: one-shot tool (`make migrate`) that applies the Postgres migrations and exits; it is not part of the runtime flow.
 - `internal/platform`: cross-cutting helpers (logging, later config).
 
 Runtime flow (spans several of the entry points):
