@@ -2,13 +2,16 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -29,6 +32,40 @@ type Provider struct {
 	RPS      float64       `yaml:"rps"`      // outbound calls per second to this provider on this channel
 	Timeout  time.Duration `yaml:"timeout"`  // limit for one call to it
 	Breaker  Breaker       `yaml:"breaker"`
+
+	// WebhookSecret is the key the provider signs its webhooks with. It is
+	// optional: only cmd/webhook reads it, and a provider without one cannot
+	// deliver webhooks. Being set through a placeholder, it can only hold
+	// letters, digits and . _ + - (hex is a good choice).
+	WebhookSecret Secret `yaml:"webhook_secret"`
+}
+
+// Secret is a credential that prints as [redacted] with %v, %+v, %#v, in JSON and
+// in slog, so logging a Provider or the whole chain cannot leak it. Reveal returns
+// the value.
+type Secret string
+
+// Reveal returns the secret itself.
+func (s Secret) Reveal() string { return string(s) }
+
+// String implements fmt.Stringer.
+func (s Secret) String() string { return redacted(s) }
+
+// GoString implements fmt.GoStringer.
+func (s Secret) GoString() string { return redacted(s) }
+
+// LogValue implements slog.LogValuer.
+func (s Secret) LogValue() slog.Value { return slog.StringValue(redacted(s)) }
+
+// MarshalJSON implements json.Marshaler, which slog's JSON handler uses for a
+// Secret nested in a struct.
+func (s Secret) MarshalJSON() ([]byte, error) { return json.Marshal(redacted(s)) }
+
+func redacted(s Secret) string {
+	if s == "" {
+		return ""
+	}
+	return "[redacted]"
 }
 
 // Breaker is the circuit breaker policy of one provider.
@@ -62,6 +99,10 @@ var safeValue = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 // field, like 2 for two seconds, would otherwise be read as 2 nanoseconds.
 const minDuration = time.Millisecond
 
+// minWebhookSecret is the shortest webhook secret accepted, so a placeholder
+// value like "x" cannot pass for a key.
+const minWebhookSecret = 16
+
 // ParseProviders parses the providers YAML. Values come from the environment
 // through ${NAME} or ${NAME:-default} placeholders, which are replaced before
 // the YAML is read, so they work anywhere a value does (and in comments, so
@@ -75,7 +116,7 @@ func ParseProviders(data []byte, getenv func(string) string) (Providers, error) 
 		sub := placeholder.FindSubmatch(m)
 		if v := getenv(string(sub[1])); v != "" {
 			if !safeValue.MatchString(v) {
-				errs = append(errs, fmt.Errorf("environment variable %s: %q has characters other than letters, digits and . _ + -", sub[1], v))
+				errs = append(errs, fmt.Errorf("environment variable %s: %s has characters other than letters, digits and . _ + -", sub[1], shown(string(sub[1]), v)))
 				return nil
 			}
 			return []byte(v)
@@ -107,6 +148,15 @@ func ParseProviders(data []byte, getenv func(string) string) (Providers, error) 
 		sort.SliceStable(list, func(i, j int) bool { return list[i].Priority < list[j].Priority })
 	}
 	return p, nil
+}
+
+// shown quotes an environment value for an error message, or hides it when the
+// variable's name says it holds a secret.
+func shown(name, value string) string {
+	if strings.Contains(strings.ToUpper(name), "SECRET") {
+		return "the value (not shown, it is a secret)"
+	}
+	return fmt.Sprintf("%q", value)
 }
 
 func (p Providers) validate() error {
@@ -153,6 +203,9 @@ func (p Providers) validate() error {
 			}
 			if pr.Breaker.Failures < 1 {
 				errs = append(errs, fmt.Errorf("%s: breaker.failures must be at least 1", at))
+			}
+			if pr.WebhookSecret != "" && len(pr.WebhookSecret) < minWebhookSecret {
+				errs = append(errs, fmt.Errorf("%s: webhook_secret must be at least %d characters", at, minWebhookSecret))
 			}
 			if pr.Breaker.OpenFor < minDuration {
 				errs = append(errs, fmt.Errorf("%s: breaker.open_for must be a duration of at least 1ms, with a unit such as 30s", at))

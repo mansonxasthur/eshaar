@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,5 +156,69 @@ sms:
 	}
 	if p["sms"][0].Name != "second" || p["sms"][2].Name != "first" {
 		t.Errorf("chain = %+v, want first demoted to the end", p["sms"])
+	}
+}
+
+func TestParseProvidersReadsWebhookSecret(t *testing.T) {
+	const in = "sms:\n  - {name: a, priority: 1, rps: 1, timeout: 1s, breaker: {failures: 1, open_for: 1s}, webhook_secret: '${A_SECRET:-}'}\n  - {name: b, priority: 2, rps: 1, timeout: 1s, breaker: {failures: 1, open_for: 1s}}\n"
+	p, err := ParseProviders([]byte(in), env(map[string]string{"A_SECRET": "0123456789abcdef"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p["sms"][0].WebhookSecret.Reveal(); got != "0123456789abcdef" {
+		t.Errorf("secret = %q", got)
+	}
+	if got := p["sms"][1].WebhookSecret.Reveal(); got != "" {
+		t.Errorf("provider without a secret has %q", got)
+	}
+	if p, err = ParseProviders([]byte(in), env(nil)); err != nil || p["sms"][0].WebhookSecret.Reveal() != "" {
+		t.Errorf("an unset secret should be empty: %v, %q", err, p["sms"][0].WebhookSecret.Reveal())
+	}
+}
+
+func TestParseProvidersRejectsShortWebhookSecret(t *testing.T) {
+	const in = "sms:\n  - {name: a, priority: 1, rps: 1, timeout: 1s, breaker: {failures: 1, open_for: 1s}, webhook_secret: short}\n"
+	if _, err := ParseProviders([]byte(in), env(nil)); err == nil || !strings.Contains(err.Error(), "webhook_secret") {
+		t.Errorf("short secret accepted: %v", err)
+	}
+}
+
+func TestParseProvidersDoesNotEchoUnsafeEnvValue(t *testing.T) {
+	const in = "sms:\n  - {name: a, priority: 1, rps: 1, timeout: 1s, breaker: {failures: 1, open_for: 1s}, webhook_secret: '${A_WEBHOOK_SECRET}'}\n"
+	_, err := ParseProviders([]byte(in), env(map[string]string{"A_WEBHOOK_SECRET": "s3cret/with:chars"}))
+	if err == nil || strings.Contains(err.Error(), "s3cret") || !strings.Contains(err.Error(), "A_WEBHOOK_SECRET") {
+		t.Errorf("error should name the variable and hide the value: %v", err)
+	}
+}
+
+func TestParseProvidersWebhookSecretLengthBoundary(t *testing.T) {
+	const in = "sms:\n  - {name: a, priority: 1, rps: 1, timeout: 1s, breaker: {failures: 1, open_for: 1s}, webhook_secret: '${S}'}\n"
+	for secret, ok := range map[string]bool{"123456789012345": false, "1234567890123456": true} {
+		_, err := ParseProviders([]byte(in), env(map[string]string{"S": secret}))
+		if (err == nil) != ok {
+			t.Errorf("secret of %d characters: err = %v, want accepted = %v", len(secret), err, ok)
+		}
+		if err != nil && strings.Contains(err.Error(), secret) {
+			t.Errorf("error echoes the secret: %v", err)
+		}
+	}
+}
+
+func TestSecretIsRedactedWhenPrinted(t *testing.T) {
+	p := Provider{Name: "a", WebhookSecret: "0123456789abcdef"}
+	var buf strings.Builder
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("loaded", "provider", p, "secret", p.WebhookSecret)
+	for _, out := range []string{fmt.Sprintf("%v", p), fmt.Sprintf("%+v", p), fmt.Sprintf("%#v", p), buf.String()} {
+		if strings.Contains(out, "0123456789abcdef") {
+			t.Errorf("secret leaked: %s", out)
+		}
+	}
+}
+
+func TestParseProvidersShowsUnsafeValueOfOrdinaryVariable(t *testing.T) {
+	const in = "sms:\n  - {name: a, priority: 1, rps: '${R}', timeout: 1s, breaker: {failures: 1, open_for: 1s}}\n"
+	_, err := ParseProviders([]byte(in), env(map[string]string{"R": "10/s"}))
+	if err == nil || !strings.Contains(err.Error(), "10/s") {
+		t.Errorf("error should show the bad value: %v", err)
 	}
 }
