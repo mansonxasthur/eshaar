@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -16,6 +17,10 @@ const (
 	EnvKafkaBrokers = "KAFKA_BROKERS"
 	EnvKafkaTopic   = "KAFKA_TOPIC"
 	EnvHTTPAddr     = "HTTP_ADDR"
+
+	EnvAPIKeys        = "DISPATCHER_API_KEYS"
+	EnvRateLimitRPS   = "RATE_LIMIT_RPS"
+	EnvRateLimitBurst = "RATE_LIMIT_BURST"
 )
 
 // Need selects the settings a process requires. Settings a process does not
@@ -28,6 +33,7 @@ const (
 	NeedDatabase Need = 1 << iota
 	NeedKafka
 	NeedHTTP
+	NeedAPIKeys // API keys and the per-key rate limit
 )
 
 // Config holds the settings shared by the Eshaar processes.
@@ -36,6 +42,10 @@ type Config struct {
 	KafkaBrokers []string // seed brokers, host:port
 	KafkaTopic   string   // topic the dispatcher publishes to and the sender consumes
 	HTTPAddr     string   // listen address for processes that serve HTTP
+
+	APIKeys        []string // accepted X-API-Key values (dispatcher)
+	RateLimitRPS   float64  // requests per second allowed per API key, per instance
+	RateLimitBurst int      // burst size per API key
 }
 
 // Load reads the configuration through getenv (os.Getenv in production) and
@@ -46,13 +56,25 @@ func Load(getenv func(string) string, need Need) (Config, error) {
 		KafkaTopic:  valueOr(getenv(EnvKafkaTopic), "notifications"),
 		HTTPAddr:    valueOr(getenv(EnvHTTPAddr), ":8080"),
 	}
-	for _, b := range strings.Split(getenv(EnvKafkaBrokers), ",") {
-		if b = strings.TrimSpace(b); b != "" {
-			cfg.KafkaBrokers = append(cfg.KafkaBrokers, b)
-		}
-	}
+	cfg.KafkaBrokers = splitList(getenv(EnvKafkaBrokers))
+
+	cfg.APIKeys = splitList(getenv(EnvAPIKeys))
 
 	var errs []error
+	if need&NeedAPIKeys != 0 {
+		if len(cfg.APIKeys) == 0 {
+			errs = append(errs, fmt.Errorf("%s is required (comma-separated)", EnvAPIKeys))
+		}
+		rps, err := strconv.ParseFloat(valueOr(getenv(EnvRateLimitRPS), "1000"), 64)
+		if err != nil || math.IsNaN(rps) || math.IsInf(rps, 0) || rps <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be a positive number", EnvRateLimitRPS))
+		}
+		burst, err := strconv.Atoi(valueOr(getenv(EnvRateLimitBurst), "2000"))
+		if err != nil || burst < 1 {
+			errs = append(errs, fmt.Errorf("%s must be an integer of at least 1", EnvRateLimitBurst))
+		}
+		cfg.RateLimitRPS, cfg.RateLimitBurst = rps, burst
+	}
 	if need&NeedDatabase != 0 {
 		errs = append(errs, checkDatabaseURL(cfg.DatabaseURL))
 	}
@@ -102,6 +124,17 @@ func checkHostPort(addr string, needHost bool) error {
 		return fmt.Errorf("%q has an invalid port", addr)
 	}
 	return nil
+}
+
+// splitList splits a comma-separated list and drops blank items.
+func splitList(s string) []string {
+	var out []string
+	for _, item := range strings.Split(s, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func valueOr(v, def string) string {
