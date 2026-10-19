@@ -2,7 +2,7 @@
 
 BINARIES := dispatcher sender webhook janitor migrate loadtest
 
-.PHONY: help fmt fmt-check vet lint test verify build tidy hooks up down migrate stack-up stack-down loadtest loadtest-report
+.PHONY: help fmt fmt-check vet lint test verify bench bench-short build tidy hooks up down migrate stack-up stack-down loadtest loadtest-report
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "%-12s %s\n", $$1, $$2}'
@@ -26,6 +26,13 @@ test: ## Run all tests with the race detector
 	go test -race -count=1 ./...
 
 verify: fmt-check vet lint test ## Everything that must pass before a commit
+
+BENCHTIME ?= 1s
+bench: ## Run the benchmarks, including the Postgres ones (needs Docker)
+	go test -run '^$$' -bench . -benchmem -benchtime=$(BENCHTIME) ./...
+
+bench-short: ## Run the benchmarks that need no Docker
+	go test -short -run '^$$' -bench . -benchmem -benchtime=$(BENCHTIME) ./...
 
 build: ## Build all entry points into bin/
 	@for b in $(BINARIES); do \

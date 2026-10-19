@@ -10,6 +10,7 @@ Eshaar is a notification system (Go, Postgres, Kafka). One request carries one n
 make verify        # fmt-check, vet, golangci-lint, test (-race); must pass before every commit
 make fmt           # gofmt + golangci-lint fmt (goimports with local prefix)
 make test          # go test -race -count=1 ./...
+make bench-short   # benchmarks that need no Docker (make bench adds the Postgres ones); baseline in docs/benchmarks.md
 make build         # builds cmd/* into bin/
 make hooks         # one-time per clone: git config core.hooksPath .githooks
 go test -race -run TestName ./internal/platform/logging   # single test

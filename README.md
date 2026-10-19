@@ -55,7 +55,7 @@ These are the assumptions behind the design. The decision log has the reasoning;
 | [`docs/implementation_plan.md`](docs/implementation_plan.md) | The seven phases, what each delivers, its tests and its status |
 | [`docs/api.md`](docs/api.md) | The HTTP endpoints, request and response rules, and configuration |
 | [`docs/load_test.md`](docs/load_test.md) | Load test and provider failure results, with the commands to reproduce them |
-| [`docs/benchmarks.md`](docs/benchmarks.md) | Micro-benchmarks of the hot paths with a baseline (added by the benchmarks pull request) |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | Micro-benchmarks of the hot paths with a baseline |
 | [`CLAUDE.md`](CLAUDE.md) | Working rules for the repository: commands, commit rules, workflow, architecture rules |
 
 ### Plans under `_plans/`
